@@ -130,7 +130,7 @@ VITE_GOOGLE_CLIENT_ID=your_google_oauth_client_id
 
 Add the Devpost demo link here (must be under 60 seconds):
 
-- `[Demo Video URL](https://example.com)`
+- `[Demo Video URL](https://youtu.be/KsWl5x81Quw)`
 
 ## Team
 
