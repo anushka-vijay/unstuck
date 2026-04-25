@@ -1,0 +1,77 @@
+@import url("https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-paper text-ink font-body antialiased;
+    background-image:
+      radial-gradient(rgba(26, 22, 20, 0.06) 1px, transparent 1px),
+      radial-gradient(rgba(26, 22, 20, 0.04) 1px, transparent 1px);
+    background-size: 24px 24px, 24px 24px;
+    background-position: 0 0, 12px 12px;
+  }
+}
+
+@layer components {
+  .press-btn {
+    @apply relative inline-flex items-center justify-center border-[3px] border-ink shadow-chunky transition-all duration-100 ease-out select-none;
+  }
+  .press-btn:hover:not(:disabled) {
+    @apply -translate-x-[2px] -translate-y-[2px] shadow-chunkyHover;
+  }
+  .press-btn:active:not(:disabled) {
+    @apply translate-x-[4px] translate-y-[4px] shadow-chunkyPress;
+  }
+  .press-btn:disabled {
+    @apply opacity-50 cursor-not-allowed;
+  }
+
+  .chip {
+    @apply border-[3px] border-ink bg-cream px-4 py-3 text-left font-medium shadow-soft transition-all duration-100;
+  }
+  .chip:hover {
+    @apply -translate-x-[2px] -translate-y-[2px] shadow-chunky;
+  }
+  .chip.selected {
+    @apply bg-mustard translate-x-[2px] translate-y-[2px] shadow-chunkyPress;
+  }
+
+  .card {
+    @apply border-[3px] border-ink bg-cream shadow-chunky;
+  }
+}
+
+@keyframes bounce-in {
+  0% {
+    opacity: 0;
+    transform: translateY(12px) scale(0.96);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.anim-in {
+  animation: bounce-in 0.35s cubic-bezier(0.19, 1, 0.22, 1) both;
+}
+
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.2;
+  }
+}
+.dot-loading {
+  animation: blink 1.2s infinite;
+}
