@@ -56,7 +56,11 @@ function loadGoogleScript(): Promise<void> {
   return googleScriptPromise;
 }
 
-async function getCalendarAccessToken(clientId: string): Promise<string> {
+async function getCalendarAccessToken(
+  clientId: string,
+  scope: string,
+  prompt: string = "select_account"
+): Promise<string> {
   await loadGoogleScript();
   const oauth = window.google?.accounts?.oauth2;
   if (!oauth) throw new Error("Google OAuth client not available.");
@@ -64,7 +68,7 @@ async function getCalendarAccessToken(clientId: string): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     const tokenClient = oauth.initTokenClient({
       client_id: clientId,
-      scope: "https://www.googleapis.com/auth/calendar.events",
+      scope,
       callback: (resp: GoogleTokenResponse) => {
         if (resp.error) {
           reject(new Error(`Google OAuth failed: ${resp.error}`));
@@ -93,25 +97,62 @@ async function getCalendarAccessToken(clientId: string): Promise<string> {
         reject(new Error(`Google OAuth failed: ${type}`));
       },
     });
-    tokenClient.requestAccessToken({ prompt: "select_account" });
+    tokenClient.requestAccessToken({ prompt });
   });
 }
 
 function buildEventWindow() {
   const start = new Date();
-  start.setMinutes(start.getMinutes() + 5);
   start.setSeconds(0, 0);
-  const end = new Date(start.getTime() + 30 * 60 * 1000);
+  const mins = start.getMinutes();
+  const nextTen = Math.ceil(mins / 10) * 10;
+  start.setMinutes(nextTen, 0, 0);
+  const end = new Date(start.getTime() + 60 * 60 * 1000);
   return { start, end };
+}
+
+export interface CalendarEventPreview {
+  summary: string;
+  start: Date;
+  end: Date;
+  dateLabel: string;
+  timeRangeLabel: string;
+}
+
+function formatMonthDay(date: Date): string {
+  const month = date.toLocaleString(undefined, { month: "long" });
+  return `${month} ${date.getDate()}`;
+}
+
+function formatTime(date: Date): string {
+  const h24 = date.getHours();
+  const mins = date.getMinutes().toString().padStart(2, "0");
+  const suffix = h24 >= 12 ? "pm" : "am";
+  const hour12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  return `${hour12}.${mins}${suffix}`;
+}
+
+export function getCalendarEventPreview(taskText: string): CalendarEventPreview {
+  const { start, end } = buildEventWindow();
+  const summary = taskText.trim().slice(0, 120) || "Unstuck task";
+  return {
+    summary,
+    start,
+    end,
+    dateLabel: formatMonthDay(start),
+    timeRangeLabel: `${formatTime(start)} to ${formatTime(end)}`,
+  };
 }
 
 export async function addTaskToGoogleCalendar(
   clientId: string,
   taskText: string
 ): Promise<void> {
-  const accessToken = await getCalendarAccessToken(clientId);
-  const { start, end } = buildEventWindow();
-  const summary = taskText.trim().slice(0, 120) || "Unstuck task";
+  const accessToken = await getCalendarAccessToken(
+    clientId,
+    "https://www.googleapis.com/auth/calendar.events"
+  );
+  const preview = getCalendarEventPreview(taskText);
 
   const res = await fetch(
     "https://www.googleapis.com/calendar/v3/calendars/primary/events",
@@ -122,14 +163,14 @@ export async function addTaskToGoogleCalendar(
         Authorization: `Bearer ${accessToken}`,
       },
       body: JSON.stringify({
-        summary,
+        summary: preview.summary,
         description: "Created from The Unstuck Button.",
         start: {
-          dateTime: start.toISOString(),
+          dateTime: preview.start.toISOString(),
           timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         },
         end: {
-          dateTime: end.toISOString(),
+          dateTime: preview.end.toISOString(),
           timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         },
       }),
@@ -142,5 +183,68 @@ export async function addTaskToGoogleCalendar(
       `Failed to create calendar event (${res.status}). ${body || ""}`.trim()
     );
   }
+}
+
+function asDateString(start?: { dateTime?: string; date?: string }): string {
+  if (!start) return "unknown time";
+  if (start.dateTime) return new Date(start.dateTime).toLocaleString();
+  if (start.date) return `${start.date} (all day)`;
+  return "unknown time";
+}
+
+export async function fetchCalendarContext(clientId: string): Promise<string> {
+  const accessToken = await getCalendarAccessToken(
+    clientId,
+    "https://www.googleapis.com/auth/calendar.readonly"
+  );
+  const now = new Date();
+  const until = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
+  const url =
+    "https://www.googleapis.com/calendar/v3/calendars/primary/events" +
+    `?timeMin=${encodeURIComponent(now.toISOString())}` +
+    `&timeMax=${encodeURIComponent(until.toISOString())}` +
+    "&singleEvents=true&orderBy=startTime&maxResults=20";
+
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(
+      `Failed to read calendar (${res.status}). ${body || ""}`.trim()
+    );
+  }
+
+  const data = (await res.json()) as {
+    items?: Array<{
+      summary?: string;
+      description?: string;
+      start?: { dateTime?: string; date?: string };
+      end?: { dateTime?: string; date?: string };
+    }>;
+  };
+  const items = data.items || [];
+  const deadlineRe = /\b(due|deadline|exam|submission|deliverable|final)\b/i;
+
+  const deadlines = items
+    .filter((e) => deadlineRe.test(`${e.summary || ""} ${e.description || ""}`))
+    .slice(0, 5)
+    .map((e) => `- ${e.summary || "Untitled"} @ ${asDateString(e.start)}`);
+
+  const busy = items
+    .slice(0, 8)
+    .map(
+      (e) =>
+        `- ${asDateString(e.start)} to ${asDateString(e.end)}: ${
+          e.summary || "busy"
+        }`
+    );
+
+  return [
+    "Calendar context (next 14 days):",
+    deadlines.length ? "Likely deadlines:\n" + deadlines.join("\n") : "Likely deadlines:\n- none detected",
+    "Busy windows:\n" + (busy.length ? busy.join("\n") : "- none"),
+    "Avoid proposing actions that conflict with these windows or urgent deadlines.",
+  ].join("\n\n");
 }
 

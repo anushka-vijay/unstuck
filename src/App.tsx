@@ -3,6 +3,8 @@ import {
   extractTasks,
   getUnstickAction,
   hasApiKey,
+  transcribeAudio,
+  type BrainImage,
   type Energy,
   type Minutes,
   type UnstickResult,
@@ -11,7 +13,11 @@ import {
   connectGoogleEmail,
   type InboxPreviewItem,
 } from "./lib/emailOAuth";
-import { addTaskToGoogleCalendar } from "./lib/googleCalendar";
+import {
+  addTaskToGoogleCalendar,
+  fetchCalendarContext,
+  getCalendarEventPreview,
+} from "./lib/googleCalendar";
 
 type Step = "dump" | "tasks" | "setup" | "action";
 type EmailProvider = "gmail" | "outlook";
@@ -56,6 +62,7 @@ export default function App() {
   const [step, setStep] = useState<Step>("dump");
 
   const [dump, setDump] = useState("");
+  const [images, setImages] = useState<BrainImage[]>([]);
   const [tasks, setTasks] = useState<string[]>([]);
   const [task, setTask] = useState<string>("");
   const [energy, setEnergy] = useState<Energy | null>(null);
@@ -64,12 +71,16 @@ export default function App() {
 
   const [loadingTasks, setLoadingTasks] = useState(false);
   const [loadingAction, setLoadingAction] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [showKeyModal, setShowKeyModal] = useState(false);
   const [apiReady, setApiReady] = useState(hasApiKey());
   const [showEmailModal, setShowEmailModal] = useState(false);
   const [emailConnection, setEmailConnection] = useState<EmailConnection | null>(
     readEmailConnection()
   );
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
 
   const stepIndex: Record<Step, number> = {
     dump: 0,
@@ -79,11 +90,11 @@ export default function App() {
   };
 
   async function onExtractTasks() {
-    if (!dump.trim()) return;
+    if (!dump.trim() && images.length === 0) return;
     setLoadingTasks(true);
     setStep("tasks");
     try {
-      const list = await extractTasks(dump.trim());
+      const list = await extractTasks(dump.trim(), images);
       const withEscape = [...list];
       if (!withEscape.includes(ESCAPE_TASK)) withEscape.push(ESCAPE_TASK);
       setTasks(withEscape);
@@ -102,11 +113,24 @@ export default function App() {
     setLoadingAction(true);
     setStep("action");
     try {
+      const googleClientId = (
+        import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined
+      )?.trim();
+      let calendarContext: string | undefined = undefined;
+      if (googleClientId) {
+        try {
+          calendarContext = await fetchCalendarContext(googleClientId);
+        } catch (err) {
+          console.warn("Calendar context unavailable; continuing.", err);
+        }
+      }
       const r = await getUnstickAction({
         dump: dump.trim(),
         task,
         energy,
         minutes,
+        images,
+        calendarContext,
       });
       setResult(r);
     } finally {
@@ -117,11 +141,69 @@ export default function App() {
   function reset() {
     setStep("dump");
     setDump("");
+    setImages([]);
     setTasks([]);
     setTask("");
     setEnergy(null);
     setMinutes(null);
     setResult(null);
+  }
+
+  async function handleAddImages(files: FileList | File[] | null) {
+    if (!files || files.length === 0) return;
+    const loaded = await Promise.all(
+      Array.from(files).map(
+        (file) =>
+          new Promise<BrainImage>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () =>
+              resolve({ name: file.name, dataUrl: String(reader.result || "") });
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(file);
+          })
+      )
+    );
+    setImages((prev) => [...prev, ...loaded]);
+  }
+
+  function removeImage(index: number) {
+    setImages((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  async function toggleRecording() {
+    if (!isRecording) {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      audioChunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+      recorder.start();
+      mediaRecorderRef.current = recorder;
+      setIsRecording(true);
+      return;
+    }
+
+    const recorder = mediaRecorderRef.current;
+    if (!recorder) return;
+    const audioBlob = await new Promise<Blob>((resolve) => {
+      recorder.onstop = () => {
+        const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+        resolve(blob);
+      };
+      recorder.stop();
+      recorder.stream.getTracks().forEach((t) => t.stop());
+    });
+    setIsRecording(false);
+    setIsTranscribing(true);
+    try {
+      const transcript = await transcribeAudio(audioBlob);
+      if (transcript.trim()) {
+        setDump((prev) => (prev ? `${prev}\n\n${transcript}` : transcript));
+      }
+    } finally {
+      setIsTranscribing(false);
+    }
   }
 
   return (
@@ -140,7 +222,13 @@ export default function App() {
           {step === "dump" && (
             <DumpStep
               dump={dump}
+              images={images}
+              isRecording={isRecording}
+              isTranscribing={isTranscribing}
               onChange={setDump}
+              onAddImages={handleAddImages}
+              onRemoveImage={removeImage}
+              onToggleMic={toggleRecording}
               onNext={onExtractTasks}
             />
           )}
@@ -276,18 +364,51 @@ function ProgressDots({ current }: { current: number }) {
 
 function DumpStep({
   dump,
+  images,
+  isRecording,
+  isTranscribing,
   onChange,
+  onAddImages,
+  onRemoveImage,
+  onToggleMic,
   onNext,
 }: {
   dump: string;
+  images: BrainImage[];
+  isRecording: boolean;
+  isTranscribing: boolean;
   onChange: (v: string) => void;
+  onAddImages: (files: FileList | File[] | null) => void;
+  onRemoveImage: (index: number) => void;
+  onToggleMic: () => Promise<void>;
   onNext: () => void;
 }) {
   const ref = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     ref.current?.focus();
   }, []);
-  const canGo = dump.trim().length >= 3;
+  const canGo = dump.trim().length >= 3 || images.length > 0;
+
+  function handlePasteImages(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const files = Array.from(e.clipboardData.files || []).filter((f) =>
+      f.type.startsWith("image/")
+    );
+    if (files.length > 0) {
+      e.preventDefault();
+      onAddImages(files);
+    }
+  }
+
+  function handleDropImages(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    const files = Array.from(e.dataTransfer.files || []).filter((f) =>
+      f.type.startsWith("image/")
+    );
+    if (files.length > 0) {
+      onAddImages(files);
+    }
+  }
+
   return (
     <section>
       <h1 className="font-display text-4xl sm:text-5xl font-semibold leading-[1.05] mb-3">
@@ -297,11 +418,16 @@ function DumpStep({
         Dump it here. Messy is fine — actually preferred.
       </p>
 
-      <div className="card p-1 mb-5">
+      <div
+        className="card p-1 mb-5"
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={handleDropImages}
+      >
         <textarea
           ref={ref}
           value={dump}
           onChange={(e) => onChange(e.target.value)}
+          onPaste={handlePasteImages}
           placeholder="ugh i have to email my prof and the thing due friday and i haven't eaten and i don't know where to start"
           className="w-full h-48 sm:h-56 resize-none bg-cream p-5 font-body text-lg leading-relaxed focus:outline-none placeholder:text-ink/30"
           onKeyDown={(e) => {
@@ -311,6 +437,55 @@ function DumpStep({
           }}
         />
       </div>
+
+      <div className="flex flex-wrap items-center gap-2 mb-5">
+        <label className="press-btn bg-paper px-4 py-2 text-sm cursor-pointer">
+          <span className="text-lg leading-none" aria-label="add image">
+            📷
+          </span>
+          <input
+            type="file"
+            accept="image/*"
+            multiple
+            className="hidden"
+            onChange={(e) => onAddImages(e.target.files)}
+          />
+        </label>
+        <button
+          onClick={() => void onToggleMic()}
+          className={`press-btn px-4 py-2 text-sm ${
+            isRecording ? "bg-rust text-paper" : "bg-paper text-ink"
+          }`}
+          aria-label={isRecording ? "stop recording" : "start voice input"}
+          title={isRecording ? "Stop recording" : "Start voice input"}
+        >
+          <span className="text-lg leading-none">🎤</span>
+        </button>
+        {isTranscribing && (
+          <span className="text-xs text-ink/60 font-mono">transcribing…</span>
+        )}
+      </div>
+
+      {images.length > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-5">
+          {images.map((img, i) => (
+            <div key={img.name + i} className="card bg-paper p-2">
+              <img
+                src={img.dataUrl}
+                alt={img.name}
+                className="w-full h-24 object-cover border-2 border-ink/10"
+              />
+              <div className="text-xs mt-2 truncate">{img.name}</div>
+              <button
+                onClick={() => onRemoveImage(i)}
+                className="text-xs underline text-ink/60 hover:text-ink"
+              >
+                remove
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="flex items-center justify-between gap-3">
         <div className="text-xs text-ink/50 font-mono">
@@ -540,9 +715,14 @@ function ActionStep({
   const dots = useMemo(() => [0, 1, 2], []);
   const [addingToCalendar, setAddingToCalendar] = useState(false);
   const [calendarStatus, setCalendarStatus] = useState<string | null>(null);
+  const [showCalendarPreview, setShowCalendarPreview] = useState(false);
   const googleClientId = (
     import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined
   )?.trim();
+  const calendarPreview = useMemo(
+    () => getCalendarEventPreview((result?.action || task || "").trim()),
+    [result, task]
+  );
 
   async function onAddToCalendar() {
     if (!googleClientId || !result) return;
@@ -588,32 +768,61 @@ function ActionStep({
           <div className="border-l-[3px] border-ink pl-4 mb-8 text-ink/80 italic">
             {result.validation}
           </div>
-          <div className="flex flex-col sm:flex-row gap-3">
-            <button
-              onClick={onReset}
-              className="press-btn bg-cream font-semibold px-5 py-3"
-            >
-              start over
-            </button>
-            <button
-              onClick={onAddToCalendar}
-              disabled={!googleClientId || addingToCalendar}
-              className="press-btn bg-sage text-ink font-semibold px-5 py-3"
-              title={
-                googleClientId
-                  ? "Add this task to Google Calendar"
-                  : "Missing VITE_GOOGLE_CLIENT_ID"
-              }
-            >
-              {addingToCalendar ? "adding to calendar..." : "add to calendar"}
-            </button>
-            <div className="text-sm text-ink/50 sm:ml-auto sm:self-center">
-              no streak. no score. close the tab when you're done.
+          <div
+            className="relative"
+            onMouseLeave={() => setShowCalendarPreview(false)}
+          >
+            <div className="flex flex-col sm:flex-row gap-3">
+              <button
+                onClick={onReset}
+                className="press-btn bg-cream font-semibold px-5 py-3"
+              >
+                start over
+              </button>
+              <button
+                onClick={onAddToCalendar}
+                onMouseEnter={() => setShowCalendarPreview(true)}
+                onFocus={() => setShowCalendarPreview(true)}
+                onBlur={() => setShowCalendarPreview(false)}
+                disabled={!googleClientId || addingToCalendar}
+                className="press-btn bg-sage text-ink font-semibold px-5 py-3"
+                title={
+                  googleClientId
+                    ? "Add this task to Google Calendar"
+                    : "Missing VITE_GOOGLE_CLIENT_ID"
+                }
+              >
+                {addingToCalendar ? "adding to calendar..." : "add to calendar"}
+              </button>
+              <div className="text-sm text-ink/50 sm:ml-auto sm:self-center">
+                no streak. no score. close the tab when you're done.
+              </div>
             </div>
+            {showCalendarPreview && (
+              <div className="pointer-events-none absolute left-0 right-0 top-full mt-2 z-20 card bg-paper p-4">
+                <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-ink/40 mb-2">
+                  Calendar Preview
+                </div>
+                <div className="space-y-2 text-sm">
+                  <div className="grid grid-cols-[56px_1fr] items-start gap-2">
+                    <span className="font-mono text-ink/50">task</span>
+                    <span className="font-semibold text-ink">{calendarPreview.summary}</span>
+                  </div>
+                  <div className="grid grid-cols-[56px_1fr] items-start gap-2">
+                    <span className="font-mono text-ink/50">date</span>
+                    <span className="text-ink/80">{calendarPreview.dateLabel}</span>
+                  </div>
+                  <div className="grid grid-cols-[56px_1fr] items-start gap-2">
+                    <span className="font-mono text-ink/50">time</span>
+                    <span className="text-ink/80">{calendarPreview.timeRangeLabel}</span>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
-          {calendarStatus && (
-            <div className="mt-3 text-sm text-ink/70">{calendarStatus}</div>
-          )}
+          <div className="mt-3 text-sm text-ink/70 min-h-6">
+            {calendarStatus || ""}
+          </div>
         </>
       )}
     </section>

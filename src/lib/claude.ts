@@ -6,11 +6,18 @@ export interface UnstickInput {
   task: string;
   energy: Energy;
   minutes: Minutes;
+  images?: BrainImage[];
+  calendarContext?: string;
 }
 
 export interface UnstickResult {
   action: string;
   validation: string;
+}
+
+export interface BrainImage {
+  name: string;
+  dataUrl: string;
 }
 
 const MODEL =
@@ -30,7 +37,44 @@ function getApiKey(): string | null {
   return envKey || localKey || null;
 }
 
-async function chatJson(system: string, user: string): Promise<unknown> {
+type ChatUserContent =
+  | string
+  | Array<{
+      type: "text" | "image_url";
+      text?: string;
+      image_url?: { url: string };
+    }>;
+
+function buildUserContent(text: string, images: BrainImage[] = []): ChatUserContent {
+  if (!images.length) return text;
+  return [
+    { type: "text", text },
+    ...images.map((img) => ({
+      type: "image_url" as const,
+      image_url: { url: img.dataUrl },
+    })),
+  ];
+}
+
+function buildUnifiedModalityPrompt(
+  dumpText: string,
+  images: BrainImage[] = []
+): string {
+  return `Multimodal context rules:
+- Use ALL available input together: typed text, transcribed voice text, and attached images.
+- Do not prioritize one modality by default. Merge signals across modalities.
+- If one modality is vague, use specifics from the others.
+- If modalities conflict, pick the most concrete and actionable interpretation.
+
+User dump text (includes any transcribed voice notes):
+"""
+${dumpText}
+"""
+
+Attached image count: ${images.length}`;
+}
+
+async function chatJson(system: string, user: ChatUserContent): Promise<unknown> {
   const apiKey = getApiKey();
   if (!apiKey) return null;
 
@@ -65,6 +109,24 @@ export function hasApiKey(): boolean {
   return !!getApiKey();
 }
 
+export async function transcribeAudio(audioBlob: Blob): Promise<string> {
+  const apiKey = getApiKey();
+  if (!apiKey) throw new Error("No API key found.");
+
+  const formData = new FormData();
+  formData.append("file", audioBlob, "recording.webm");
+  formData.append("model", "whisper-1");
+
+  const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}` },
+    body: formData,
+  });
+  if (!res.ok) throw new Error(`Transcription failed (${res.status}).`);
+  const data = (await res.json()) as { text?: string };
+  return data.text?.trim() || "";
+}
+
 function stripCodeFence(text: string): string {
   return text
     .replace(/^```(?:json)?\s*/i, "")
@@ -73,12 +135,12 @@ function stripCodeFence(text: string): string {
 }
 
 const TASK_EXTRACT_SYSTEM = `You read a messy brain-dump from someone with ADHD who is frozen and cannot start.
-Your only job is to surface the 2-3 most concrete things they mentioned that might be the one
+Your only job is to surface the concrete things they mentioned that might be the one
 thing they're trying to start right now. You are not a planner. You are not a coach.
 
 Rules:
-- Reply ONLY with JSON: {"tasks": ["...", "...", "..."]}
-- 2-3 items. Never more than 3.
+- Reply ONLY with JSON: {"tasks": ["...", "..."]}
+- Include every concrete task the user mentions. Do not cap the list.
 - Each item: 3-6 words. Starts lowercase. No trailing punctuation. No emoji.
 - Concrete and specific, using nouns FROM the user's own dump. Not a category.
 - Good: "email professor about extension". Bad: "the writing thing" or "school stuff".
@@ -96,10 +158,22 @@ Dump: "i'm panicking about the presentation and i've only made one slide"
 Dump: "kitchen is disgusting and my mom texted tuesday and laundry is piling up"
 → {"tasks": ["reply to mom's text", "start the laundry", "clean the kitchen"]}`;
 
-export async function extractTasks(dump: string): Promise<string[]> {
+export async function extractTasks(
+  dump: string,
+  images: BrainImage[] = []
+): Promise<string[]> {
   if (!getApiKey()) return fallbackTasks(dump);
   try {
-    const parsed = await chatJson(TASK_EXTRACT_SYSTEM, dump);
+    const parsed = await chatJson(
+      TASK_EXTRACT_SYSTEM,
+      buildUserContent(
+        `${buildUnifiedModalityPrompt(
+          dump,
+          images
+        )}\n\nExtract concrete tasks from all modalities.`,
+        images
+      )
+    );
     if (!parsed || typeof parsed !== "object") return fallbackTasks(dump);
     const payload = parsed as Record<string, unknown>;
     const tasks: unknown = payload.tasks;
@@ -107,8 +181,7 @@ export async function extractTasks(dump: string): Promise<string[]> {
     return tasks
       .filter((t): t is string => typeof t === "string")
       .map((t) => t.trim())
-      .filter(Boolean)
-      .slice(0, 3);
+      .filter(Boolean);
   } catch (err) {
     console.warn("extractTasks failed, using fallback", err);
     return fallbackTasks(dump);
@@ -158,6 +231,11 @@ OUTPUT FORMAT:
 Reply ONLY with JSON. No preamble. No markdown fences.
 {"action": "...", "validation": "..."}
 
+CALENDAR RULES:
+- If calendar context is provided, use it.
+- Respect existing busy windows and urgent deadlines.
+- Do not propose a step that obviously clashes with those windows.
+
 EXAMPLES:
 
 Task: "email the professor"
@@ -205,10 +283,24 @@ Full brain dump for context (do NOT summarize this, use it only to understand th
 ${input.dump}
 """
 
+Calendar context:
+"""
+${input.calendarContext || "No calendar context provided."}
+"""
+
 Give them ONE embarrassingly small, concrete, physical first step. Name specific apps, docs, people, or objects from their dump. Include a stop condition so they know when they're done with this step. Reply with JSON only.`;
 
   try {
-    const parsed = await chatJson(ACTION_SYSTEM, userMsg);
+    const parsed = await chatJson(
+      ACTION_SYSTEM,
+      buildUserContent(
+        `${buildUnifiedModalityPrompt(
+          input.dump,
+          input.images || []
+        )}\n\n${userMsg}\n\nUse all modalities together when generating the single action.`,
+        input.images || []
+      )
+    );
     if (!parsed || typeof parsed !== "object") return fallbackAction(input);
     const payload = parsed as Record<string, unknown>;
     const action =
@@ -278,11 +370,10 @@ function fallbackTasks(dump: string): string[] {
   ];
   for (const [re, label] of patterns) {
     if (re.test(lower) && !guesses.includes(label)) guesses.push(label);
-    if (guesses.length >= 3) break;
   }
   if (guesses.length === 0) guesses.push("the main thing on your mind");
   if (guesses.length < 2) guesses.push("pick the smallest piece");
-  return guesses.slice(0, 3);
+  return guesses;
 }
 
 // Concrete templates keyed by (task kind, energy) and scaled by time.
