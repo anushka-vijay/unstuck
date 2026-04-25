@@ -22,7 +22,7 @@
 
 @layer components {
   .press-btn {
-    @apply relative inline-flex items-center justify-center border-[3px] border-ink shadow-chunky transition-all duration-100 ease-out select-none;
+    @apply relative inline-flex items-center justify-center border-[3px] border-ink rounded-lg shadow-chunky transition-all duration-100 ease-out select-none;
   }
   .press-btn:hover:not(:disabled) {
     @apply -translate-x-[2px] -translate-y-[2px] shadow-chunkyHover;
@@ -35,7 +35,7 @@
   }
 
   .chip {
-    @apply border-[3px] border-ink bg-cream px-4 py-3 text-left font-medium shadow-soft transition-all duration-100;
+    @apply border-[3px] border-ink bg-cream rounded-lg px-4 py-3 text-left font-medium shadow-soft transition-all duration-100;
   }
   .chip:hover {
     @apply -translate-x-[2px] -translate-y-[2px] shadow-chunky;
@@ -45,7 +45,7 @@
   }
 
   .card {
-    @apply border-[3px] border-ink bg-cream shadow-chunky;
+    @apply border-[3px] border-ink rounded-xl bg-cream shadow-chunky;
   }
 }
 
