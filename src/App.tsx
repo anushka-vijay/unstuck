@@ -14,9 +14,11 @@ import {
 } from "./lib/emailOAuth";
 import {
   addTaskToGoogleCalendar,
+  type CalendarEventPreview,
   fetchCalendarContext,
   getCalendarEventPreview,
 } from "./lib/googleCalendar";
+import { extractTextFromDocument } from "./lib/documentText";
 
 type Step = "dump" | "tasks" | "setup" | "action";
 type EmailProvider = "gmail" | "outlook";
@@ -168,21 +170,55 @@ export default function App() {
     setResult(null);
   }
 
-  async function handleAddImages(files: FileList | File[] | null) {
+  async function handleAddAttachments(files: FileList | File[] | null) {
     if (!files || files.length === 0) return;
-    const loaded = await Promise.all(
-      Array.from(files).map(
-        (file) =>
-          new Promise<BrainImage>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () =>
-              resolve({ name: file.name, dataUrl: String(reader.result || "") });
-            reader.onerror = () => reject(reader.error);
-            reader.readAsDataURL(file);
-          })
-      )
-    );
-    setImages((prev) => [...prev, ...loaded]);
+    const list = Array.from(files);
+    const imageFiles = list.filter((f) => f.type.startsWith("image/"));
+    const docFiles = list.filter((f) => !f.type.startsWith("image/"));
+
+    if (imageFiles.length) {
+      const loaded = await Promise.all(
+        imageFiles.map(
+          (file) =>
+            new Promise<BrainImage>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () =>
+                resolve({ name: file.name, dataUrl: String(reader.result || "") });
+              reader.onerror = () => reject(reader.error);
+              reader.readAsDataURL(file);
+            })
+        )
+      );
+      setImages((prev) => [...prev, ...loaded]);
+    }
+
+    if (docFiles.length) {
+      const extracted: string[] = [];
+      const nonTextNames: string[] = [];
+
+      for (const file of docFiles) {
+        try {
+          const content = await extractTextFromDocument(file);
+          if (content.trim()) {
+            extracted.push(`\n\n[From document: ${file.name}]\n${content}`);
+          } else {
+            nonTextNames.push(file.name);
+          }
+        } catch {
+          nonTextNames.push(file.name);
+        }
+      }
+
+      if (extracted.length > 0) {
+        setDump((prev) => `${prev}${extracted.join("")}`.trim());
+      }
+      if (nonTextNames.length > 0) {
+        setDump(
+          (prev) =>
+            `${prev}\n\n[Attached document(s): ${nonTextNames.join(", ")}]`.trim()
+        );
+      }
+    }
   }
 
   function removeImage(index: number) {
@@ -266,7 +302,7 @@ export default function App() {
               isRecording={isRecording}
               isTranscribing={isTranscribing}
               onChange={setDump}
-              onAddImages={handleAddImages}
+              onAddImages={handleAddAttachments}
               onRemoveImage={removeImage}
               onToggleMic={toggleRecording}
               onNext={onExtractTasks}
@@ -417,7 +453,7 @@ function DumpStep({
     );
     if (files.length > 0) {
       e.preventDefault();
-      onAddImages(files);
+      void onAddImages(files);
     }
   }
 
@@ -472,7 +508,7 @@ function DumpStep({
           />
           <input
             type="file"
-            accept="image/*"
+            accept="image/*,.pdf,.doc,.docx,.txt,.md,.csv,.json,.rtf,.odt"
             multiple
             className="hidden"
             onChange={(e) => onAddImages(e.target.files)}
@@ -829,6 +865,7 @@ function ActionStep({
   const [calendarAdded, setCalendarAdded] = useState(false);
   const [calendarStatus, setCalendarStatus] = useState<string | null>(null);
   const [showCalendarPreview, setShowCalendarPreview] = useState(false);
+  const [calendarPreview, setCalendarPreview] = useState<CalendarEventPreview | null>(null);
   const [timerTotalSec, setTimerTotalSec] = useState(0);
   const [secondsLeft, setSecondsLeft] = useState(0);
   const [timerRunning, setTimerRunning] = useState(false);
@@ -836,10 +873,26 @@ function ActionStep({
   const googleClientId = (
     import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined
   )?.trim();
-  const calendarPreview = useMemo(
-    () => getCalendarEventPreview((result?.action || task || "").trim()),
-    [result, task]
-  );
+
+  useEffect(() => {
+    let cancelled = false;
+    const summary = (result?.action || task || "").trim();
+    if (!googleClientId || !summary) {
+      setCalendarPreview(null);
+      return;
+    }
+    void (async () => {
+      try {
+        const preview = await getCalendarEventPreview(googleClientId, summary);
+        if (!cancelled) setCalendarPreview(preview);
+      } catch {
+        if (!cancelled) setCalendarPreview(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [googleClientId, result?.action, task]);
 
   function parseTimerSeconds(actionText: string): number {
     const lower = actionText.toLowerCase();
@@ -1054,7 +1107,7 @@ function ActionStep({
           <div className="text-xs uppercase tracking-widest text-ink/50 mb-3">
             do this one thing
           </div>
-          <div className="card bg-mustard p-7 sm:p-10 mb-5">
+          <div className="card bg-[#F6D77A] p-7 sm:p-10 mb-5">
             <div className="font-display text-3xl sm:text-4xl font-semibold leading-[1.15]">
               {result.action}
             </div>
@@ -1141,7 +1194,7 @@ function ActionStep({
                 disabled={!googleClientId || addingToCalendar || calendarAdded}
                 className={
                   "press-btn font-semibold px-5 py-3 " +
-                  (calendarAdded ? "bg-sage/60 text-ink/70" : "bg-sage text-ink")
+                  (calendarAdded ? "bg-ink/60 text-paper/80" : "bg-ink text-paper")
                 }
                 title={
                   googleClientId
@@ -1164,20 +1217,24 @@ function ActionStep({
                 <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-ink/40 mb-2">
                   Calendar Preview
                 </div>
-                <div className="space-y-2 text-sm">
-                  <div className="grid grid-cols-[56px_1fr] items-start gap-2">
-                    <span className="font-mono text-ink/50">task</span>
-                    <span className="font-semibold text-ink">{calendarPreview.summary}</span>
+                {calendarPreview ? (
+                  <div className="space-y-2 text-sm">
+                    <div className="grid grid-cols-[56px_1fr] items-start gap-2">
+                      <span className="font-mono text-ink/50">task</span>
+                      <span className="font-semibold text-ink">{calendarPreview.summary}</span>
+                    </div>
+                    <div className="grid grid-cols-[56px_1fr] items-start gap-2">
+                      <span className="font-mono text-ink/50">date</span>
+                      <span className="text-ink/80">{calendarPreview.dateLabel}</span>
+                    </div>
+                    <div className="grid grid-cols-[56px_1fr] items-start gap-2">
+                      <span className="font-mono text-ink/50">time</span>
+                      <span className="text-ink/80">{calendarPreview.timeRangeLabel}</span>
+                    </div>
                   </div>
-                  <div className="grid grid-cols-[56px_1fr] items-start gap-2">
-                    <span className="font-mono text-ink/50">date</span>
-                    <span className="text-ink/80">{calendarPreview.dateLabel}</span>
-                  </div>
-                  <div className="grid grid-cols-[56px_1fr] items-start gap-2">
-                    <span className="font-mono text-ink/50">time</span>
-                    <span className="text-ink/80">{calendarPreview.timeRangeLabel}</span>
-                  </div>
-                </div>
+                ) : (
+                  <div className="text-sm text-ink/60">loading calendar-aware slot…</div>
+                )}
               </div>
             )}
           </div>
@@ -1196,58 +1253,6 @@ function Footer() {
       <span>built for brains that can't start.</span>
       <span>powered by openai</span>
     </footer>
-  );
-}
-
-function KeyModal({ onClose }: { onClose: () => void }) {
-  const [value, setValue] = useState(
-    (typeof window !== "undefined" &&
-      (window.localStorage.getItem("OPENAI_API_KEY") ||
-        window.localStorage.getItem("ANTHROPIC_API_KEY"))) ||
-      ""
-  );
-  return (
-    <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm flex items-center justify-center p-5 z-50">
-      <div className="card bg-cream w-full max-w-md p-6">
-        <div className="font-display text-2xl font-semibold mb-2">
-          Live mode
-        </div>
-        <p className="text-sm text-ink/70 mb-4">
-          Paste an OpenAI API key to run with real model responses. Stored
-          in your browser only. Leave empty to use demo-mode fallbacks.
-        </p>
-        <input
-          type="password"
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          placeholder="sk-..."
-          className="w-full border-[3px] border-ink rounded-lg bg-paper p-3 font-mono text-sm focus:outline-none mb-4"
-        />
-        <div className="flex gap-3 justify-end">
-          <button
-            onClick={() => {
-              window.localStorage.removeItem("OPENAI_API_KEY");
-              window.localStorage.removeItem("ANTHROPIC_API_KEY");
-              onClose();
-            }}
-            className="press-btn bg-paper text-ink font-semibold px-4 py-2 text-sm"
-          >
-            clear
-          </button>
-          <button
-            onClick={() => {
-              if (value.trim()) {
-                window.localStorage.setItem("OPENAI_API_KEY", value.trim());
-              }
-              onClose();
-            }}
-            className="press-btn bg-ink text-paper font-semibold px-4 py-2 text-sm"
-          >
-            save
-          </button>
-        </div>
-      </div>
-    </div>
   );
 }
 

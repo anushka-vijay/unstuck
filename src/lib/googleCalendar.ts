@@ -173,6 +173,121 @@ function buildEventWindow() {
   return { start, end };
 }
 
+interface EventInterval {
+  start: Date;
+  end: Date;
+  summary: string;
+  description: string;
+}
+
+function toEventInterval(item: {
+  summary?: string;
+  description?: string;
+  start?: { dateTime?: string; date?: string };
+  end?: { dateTime?: string; date?: string };
+}): EventInterval | null {
+  let start: Date | null = null;
+  let end: Date | null = null;
+  if (item.start?.dateTime) start = new Date(item.start.dateTime);
+  else if (item.start?.date) start = new Date(`${item.start.date}T00:00:00`);
+  if (item.end?.dateTime) end = new Date(item.end.dateTime);
+  else if (item.end?.date) end = new Date(`${item.end.date}T00:00:00`);
+  if (!start || !end || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()))
+    return null;
+  if (end <= start) return null;
+  return {
+    start,
+    end,
+    summary: item.summary || "",
+    description: item.description || "",
+  };
+}
+
+function overlapsAny(start: Date, end: Date, events: EventInterval[]): boolean {
+  // Conflict = any overlap at all.
+  return events.some((e) => start < e.end && end > e.start);
+}
+
+function roundUpToTenMinutes(d: Date): Date {
+  const x = new Date(d);
+  x.setSeconds(0, 0);
+  const nextTen = Math.ceil(x.getMinutes() / 10) * 10;
+  x.setMinutes(nextTen, 0, 0);
+  return x;
+}
+
+function inferTaskDeadline(taskText: string, events: EventInterval[]): Date | null {
+  const deadlineRe = /\b(due|deadline|exam|submission|deliverable|final)\b/i;
+  const keywords = taskText
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .filter((w) => w.length >= 4)
+    .slice(0, 6);
+  if (!keywords.length) return null;
+  const now = new Date();
+  const candidates = events
+    .filter((e) => e.start > now)
+    .filter((e) => deadlineRe.test(`${e.summary} ${e.description}`))
+    .filter((e) => {
+      const text = `${e.summary} ${e.description}`.toLowerCase();
+      return keywords.some((k) => text.includes(k));
+    })
+    .sort((a, b) => a.start.getTime() - b.start.getTime());
+  return candidates[0]?.start || null;
+}
+
+async function fetchEventIntervals(
+  accessToken: string,
+  timeMin: Date,
+  timeMax: Date
+): Promise<EventInterval[]> {
+  const url =
+    "https://www.googleapis.com/calendar/v3/calendars/primary/events" +
+    `?timeMin=${encodeURIComponent(timeMin.toISOString())}` +
+    `&timeMax=${encodeURIComponent(timeMax.toISOString())}` +
+    "&singleEvents=true&orderBy=startTime&maxResults=250";
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(
+      `Failed to read calendar (${res.status}). ${body || ""}`.trim()
+    );
+  }
+  const data = (await res.json()) as {
+    items?: Array<{
+      summary?: string;
+      description?: string;
+      start?: { dateTime?: string; date?: string };
+      end?: { dateTime?: string; date?: string };
+    }>;
+  };
+  return (data.items || [])
+    .map(toEventInterval)
+    .filter((x): x is EventInterval => !!x);
+}
+
+function findAvailableSlot(
+  events: EventInterval[],
+  now: Date,
+  durationMs: number,
+  latestEndExclusive?: Date
+): { start: Date; end: Date } | null {
+  let candidate = roundUpToTenMinutes(new Date(now.getTime() + 10 * 60 * 1000));
+  const horizon = latestEndExclusive
+    ? new Date(latestEndExclusive)
+    : new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+  while (candidate < horizon) {
+    const end = new Date(candidate.getTime() + durationMs);
+    if (latestEndExclusive && end > latestEndExclusive) break;
+    if (!overlapsAny(candidate, end, events)) return { start: candidate, end };
+    candidate = new Date(candidate.getTime() + 10 * 60 * 1000);
+  }
+  return null;
+}
+
 export interface CalendarEventPreview {
   summary: string;
   start: Date;
@@ -194,9 +309,7 @@ function formatTime(date: Date): string {
   return `${hour12}.${mins}${suffix}`;
 }
 
-export function getCalendarEventPreview(taskText: string): CalendarEventPreview {
-  const { start, end } = buildEventWindow();
-  const summary = taskText.trim().slice(0, 120) || "Unstuck task";
+function toPreview(summary: string, start: Date, end: Date): CalendarEventPreview {
   return {
     summary,
     start,
@@ -204,6 +317,51 @@ export function getCalendarEventPreview(taskText: string): CalendarEventPreview 
     dateLabel: formatMonthDay(start),
     timeRangeLabel: `${formatTime(start)} to ${formatTime(end)}`,
   };
+}
+
+async function planTaskSlot(
+  accessToken: string,
+  taskText: string
+): Promise<{ summary: string; start: Date; end: Date }> {
+  const now = new Date();
+  const searchStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const searchMax = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+  const events = (await fetchEventIntervals(accessToken, searchStart, searchMax)).filter(
+    (e) => e.end > now
+  );
+  const summary = taskText.trim().slice(0, 120) || "Unstuck task";
+  const durationMs = 60 * 60 * 1000;
+  const deadline = inferTaskDeadline(summary, events);
+  const slot =
+    findAvailableSlot(
+      events,
+      now,
+      durationMs,
+      deadline ? new Date(deadline.getTime() - durationMs) : undefined
+    ) ||
+    findAvailableSlot(events, now, durationMs) || {
+      start: buildEventWindow().start,
+      end: buildEventWindow().end,
+    };
+  return { summary, start: slot.start, end: slot.end };
+}
+
+export async function getCalendarEventPreview(
+  clientId: string,
+  taskText: string
+): Promise<CalendarEventPreview> {
+  try {
+    const accessToken = await getCalendarAccessToken(
+      clientId,
+      "https://www.googleapis.com/auth/calendar.readonly"
+    );
+    const planned = await planTaskSlot(accessToken, taskText);
+    return toPreview(planned.summary, planned.start, planned.end);
+  } catch {
+    const { start, end } = buildEventWindow();
+    const summary = taskText.trim().slice(0, 120) || "Unstuck task";
+    return toPreview(summary, start, end);
+  }
 }
 
 export async function addTaskToGoogleCalendar(
@@ -214,7 +372,7 @@ export async function addTaskToGoogleCalendar(
     clientId,
     "https://www.googleapis.com/auth/calendar.events"
   );
-  const preview = getCalendarEventPreview(taskText);
+  const planned = await planTaskSlot(accessToken, taskText);
 
   const res = await fetch(
     "https://www.googleapis.com/calendar/v3/calendars/primary/events",
@@ -225,14 +383,14 @@ export async function addTaskToGoogleCalendar(
         Authorization: `Bearer ${accessToken}`,
       },
       body: JSON.stringify({
-        summary: preview.summary,
+        summary: planned.summary,
         description: "Created from The Unstuck Button.",
         start: {
-          dateTime: preview.start.toISOString(),
+          dateTime: planned.start.toISOString(),
           timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         },
         end: {
-          dateTime: preview.end.toISOString(),
+          dateTime: planned.end.toISOString(),
           timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         },
       }),

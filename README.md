@@ -1,77 +1,142 @@
 # The Unstuck Button
 
-**One step. Right now.** A hackathon demo for ADHD initiation paralysis — built
-around the idea that the first step shouldn't be the hardest part.
+**One step. Right now.**  
+A hackathon web app built for ADHD initiation paralysis.
 
-You dump whatever's swirling, the model extracts the 2–3 things it heard,
-you tap the one you're actually trying to start, pick your energy + time,
-and get back exactly **one** embarrassingly-small first action.
+The Unstuck Button is designed for ADHD brains: it turns a chaotic brain dump into exactly one tiny, concrete first action.  
+No task manager. No streaks. No productivity score. Just enough momentum to start.
 
-No lists. No streaks. No productivity scoreboard. Close the tab when you're done.
+## Project Overview
 
-## Stack
+The core interaction is intentionally short and low-pressure:
 
-- Vite + React + TypeScript
-- Tailwind CSS (warm-brutalist theme: cream paper, thick borders, chunky shadows)
-- OpenAI Chat Completions API called directly from the browser
-- Zero backend. Zero database.
+1. **Brain dump**: user writes whatever is swirling in their head.
+2. **Task extraction**: AI (or fallback heuristics) extracts concrete tasks from text, voice transcript, and optional images.
+3. **Context selection**: user chooses current energy level and available time.
+4. **Single action output**: app returns one embarrassingly small, physical first step with a brief validation line.
 
-## Setup
+The design goal is ADHD-first: reduce startup friction during overwhelm and initiation paralysis so starting feels possible again.
+
+## Features
+
+- Multimodal input:
+  - typed brain dump
+  - voice capture + transcription (Whisper API)
+  - image attachments (included in model prompt)
+- AI task extraction from messy input
+- AI-generated micro-action constrained to one concrete, observable step
+- Safe fallback mode when API key is missing (demo never hard-fails)
+- Google Gmail OAuth connection + inbox preview
+- Google Calendar context read for action personalization
+- One-click add-to-calendar for generated action
+
+## Tech Stack
+
+### Frontend
+
+- **React 19** with **TypeScript**
+- **Vite** for dev/build tooling
+- **Tailwind CSS** for styling
+
+### AI + External APIs
+
+- **OpenAI Chat Completions API** (`gpt-4o-mini` default) for:
+  - task extraction
+  - single-step action generation
+- **OpenAI Whisper API** for microphone transcription
+- **Google Identity Services OAuth 2.0** for auth popups/tokens
+- **Gmail API** for inbox preview
+- **Google Calendar API** for:
+  - upcoming calendar context
+  - event creation from generated action
+
+### Architecture
+
+- Client-only app (no backend service)
+- No database; state stored in browser memory and `localStorage` where needed
+
+## Local Setup
+
+### Prerequisites
+
+- Node.js 18+ (recommended: latest LTS)
+- npm
+
+### Install and run
 
 ```bash
 npm install
 cp .env.example .env.local
-# open .env.local and paste your OpenAI API key
-# optional: add VITE_GOOGLE_CLIENT_ID for real Gmail OAuth connect
 npm run dev
 ```
 
-Then open the URL Vite prints (usually `http://localhost:5173`).
+Then open the local URL printed by Vite (usually `http://localhost:5173`).
 
-### No API key? Still works.
+### Environment variables
 
-If `VITE_OPENAI_API_KEY` is missing, the app drops into **demo mode**: task
-extraction uses keyword heuristics and the micro-action comes from a set of
-pre-written fallbacks sized to energy + time. The live demo literally cannot
-crash on stage.
+Create a `.env.local` file with:
 
-You can also click the `● live / ○ demo mode` pill in the top right of the app
-to paste a key at runtime (stored only in `localStorage`, never leaves the
-browser).
+```bash
+VITE_OPENAI_API_KEY=your_openai_api_key
+# optional
+VITE_OPENAI_MODEL=gpt-4o-mini
+VITE_GOOGLE_CLIENT_ID=your_google_oauth_client_id
+```
 
-### Real email OAuth (Gmail)
+### Optional: Google OAuth setup (Gmail + Calendar)
 
-To enable the real "connect email" flow:
+1. Create a Google Cloud OAuth **Web application** client.
+2. Add local origin to **Authorized JavaScript origins** (e.g. `http://localhost:5173`).
+3. Enable Gmail API and Calendar API for the project.
+4. Add client ID as `VITE_GOOGLE_CLIENT_ID`.
+5. In Google Auth consent configuration, keep app in **Testing** mode and add each user email under **Test users**.
+6. Use the in-app login button to connect Gmail.
 
-- create a Google OAuth **Web application** client in Google Cloud Console
-- set `Authorized JavaScript origins` to your Vite origin (for local: `http://localhost:5173`)
-- copy the client ID into `.env.local` as `VITE_GOOGLE_CLIENT_ID`
+## Scripts
 
-Then click `✉ connect email` in the app header and connect Gmail. The modal
-will fetch a small inbox preview via Gmail API.
+- `npm run dev` - start local development server
+- `npm run build` - type-check and production build
+- `npm run preview` - preview production build locally
+- `npm run lint` - run ESLint
 
-## The 4-step flow
+## Challenges and Solutions
 
-1. **Brain dump** — one big textarea. No structure. Messy is preferred. Cmd/Ctrl+Enter to submit.
-2. **Task chips** — the model reads the chaos, surfaces 2–3 specific things you mentioned, plus a "something else entirely" escape hatch. Tap one.
-3. **Energy + time** — three buttons each. Fumes / kinda here / awake, and 5 / 15 / 30+ min.
-4. **One micro-action** — mustard card with the single smallest physical first step, plus a short non-saccharine validation line.
+### 1) Reliable output for ADHD overwhelm
 
-That's the whole app.
+- **Challenge:** for ADHD users, generic AI responses often become too broad, motivational, or multi-step, which increases cognitive load and defeats the purpose.
+- **Solution:** strict system prompts and output schema force exactly one physical, observable action plus one short validation line.
 
-## Demo notes
+### 2) Demo reliability under bad network / missing keys
 
-- The big `Get Unstuck` button has a 3D chunky-shadow press — satisfying to
-  hit on stage.
-- Progress dots track the 4 steps without drawing attention.
-- Type something genuinely chaotic on stage. The messier the input, the
-  harder the output lands.
-- Fallbacks were designed to still feel on-brand if you go offline mid-demo.
+- **Challenge:** hackathon demos fail if external APIs are unavailable.
+- **Solution:** local fallback logic for task extraction and action generation ensures graceful behavior even without an API key.
 
-## Why this exists
+### 3) Multimodal signal merging
 
-> "Every productivity tool assumes you can prioritize, sequence, and initiate.
-> That assumption is exactly the disability. We're not optimizing productivity
-> — we're removing the neurological barrier to starting."
+- **Challenge:** users express context through text, voice, and screenshots; one channel may be incomplete.
+- **Solution:** unified prompt strategy merges all modalities and resolves conflicts toward concrete, actionable interpretation.
 
-The first step shouldn't be the hardest part.
+### 4) OAuth complexity in a client-only app
+
+- **Challenge:** integrating Gmail/Calendar securely without a backend increases token-flow and error-state complexity.
+- **Solution:** Google Identity Services token flow, scoped permissions, explicit popup/error handling, and clear degraded-mode behavior.
+
+### 5) Preserving low cognitive load in UX
+
+- **Challenge:** adding integrations can make the product feel heavy or "productivity-tool-ish."
+- **Solution:** a strict 4-step flow, minimal copy, and one-action output keep interaction short and non-overwhelming.
+
+## Demo Video
+
+Add the Devpost demo link here (must be under 60 seconds):
+
+- `[Demo Video URL](https://example.com)`
+
+## Team
+
+Add all team members on the Devpost project page and list them here:
+
+- Anushka Vijay
+- Swathi Murali
+- Madur Malliah
+- Namra Shah

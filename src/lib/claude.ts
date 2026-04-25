@@ -60,10 +60,12 @@ function buildUnifiedModalityPrompt(
   images: BrainImage[] = []
 ): string {
   return `Multimodal context rules:
-- Use ALL available input together: typed text, transcribed voice text, and attached images.
+- Use ALL available input together: typed text, transcribed voice text, uploaded document content, and attached images.
 - Do not prioritize one modality by default. Merge signals across modalities.
 - If one modality is vague, use specifics from the others.
 - If modalities conflict, pick the most concrete and actionable interpretation.
+- Uploaded documents may be included inline in the dump text (for example, "[From document: ...]").
+  Treat that document content as first-class context, same priority as typed/voice input.
 
 User dump text (includes any transcribed voice notes):
 """
