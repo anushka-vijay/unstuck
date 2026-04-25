@@ -28,7 +28,6 @@ interface EmailConnection {
   inboxPreview: InboxPreviewItem[];
 }
 
-const ESCAPE_TASK = "something else entirely";
 const EMAIL_CONNECTION_KEY = "EMAIL_OAUTH_CONNECTION";
 
 function readEmailConnection(): EmailConnection | null {
@@ -92,9 +91,7 @@ export default function App() {
     setStep("tasks");
     try {
       const list = await extractTasks(dump.trim(), images);
-      const withEscape = [...list];
-      if (!withEscape.includes(ESCAPE_TASK)) withEscape.push(ESCAPE_TASK);
-      setTasks(withEscape);
+      setTasks(list);
     } finally {
       setLoadingTasks(false);
     }
@@ -103,6 +100,31 @@ export default function App() {
   function onPickTask(t: string) {
     setTask(t);
     setStep("setup");
+  }
+
+  function onLetStart() {
+    if (tasks.length === 0) return;
+    const availableTasks = tasks.filter((t) => t.trim() !== "");
+    if (availableTasks.length === 0) return;
+    // Pick a random task from the list
+    const picked = availableTasks[Math.floor(Math.random() * availableTasks.length)];
+    onPickTask(picked);
+  }
+
+  function onKeepWorking() {
+    const remaining = tasks.filter((t) => t !== task && t.trim() !== "");
+    setTasks(remaining);
+    
+    if (remaining.length > 0) {
+      const picked = remaining[Math.floor(Math.random() * remaining.length)];
+      setTask(picked);
+      setEnergy(null);
+      setMinutes(null);
+      setResult(null);
+      setStep("setup");
+    } else {
+      reset();
+    }
   }
 
   async function onGetUnstuck() {
@@ -169,15 +191,26 @@ export default function App() {
 
   async function toggleRecording() {
     if (!isRecording) {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
-      audioChunksRef.current = [];
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunksRef.current.push(e.data);
-      };
-      recorder.start();
-      mediaRecorderRef.current = recorder;
-      setIsRecording(true);
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        
+        // Detect supported mime type
+        const mimeType = MediaRecorder.isTypeSupported("audio/webm") 
+          ? "audio/webm" 
+          : "audio/mp4";
+          
+        const recorder = new MediaRecorder(stream, { mimeType });
+        audioChunksRef.current = [];
+        recorder.ondataavailable = (e) => {
+          if (e.data.size > 0) audioChunksRef.current.push(e.data);
+        };
+        recorder.start(100); // Collect data every 100ms for better reliability
+        mediaRecorderRef.current = recorder;
+        setIsRecording(true);
+      } catch (err) {
+        console.error("Microphone access denied or failed:", err);
+        alert("Could not access microphone. Please check your browser permissions.");
+      }
       return;
     }
 
@@ -185,19 +218,31 @@ export default function App() {
     if (!recorder) return;
     const audioBlob = await new Promise<Blob>((resolve) => {
       recorder.onstop = () => {
-        const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+        const mimeType = recorder.mimeType || "audio/webm";
+        const blob = new Blob(audioChunksRef.current, { type: mimeType });
         resolve(blob);
       };
       recorder.stop();
       recorder.stream.getTracks().forEach((t) => t.stop());
     });
+
     setIsRecording(false);
     setIsTranscribing(true);
+
+    if (audioBlob.size < 100) {
+      console.warn("Audio blob too small, likely no data recorded.");
+      setIsTranscribing(false);
+      return;
+    }
+
     try {
       const transcript = await transcribeAudio(audioBlob);
       if (transcript.trim()) {
         setDump((prev) => (prev ? `${prev}\n\n${transcript}` : transcript));
       }
+    } catch (err) {
+      console.error("Transcription failed:", err);
+      alert(err instanceof Error ? err.message : "Transcription failed. Check your API key and microphone permissions.");
     } finally {
       setIsTranscribing(false);
     }
@@ -231,7 +276,8 @@ export default function App() {
             <TasksStep
               loading={loadingTasks}
               tasks={tasks}
-              onPick={onPickTask}
+              setTasks={setTasks}
+              onStart={onLetStart}
               onBack={() => setStep("dump")}
             />
           )}
@@ -252,6 +298,8 @@ export default function App() {
               result={result}
               task={task}
               onReset={reset}
+              onKeepWorking={onKeepWorking}
+              hasMoreTasks={tasks.length > 1}
             />
           )}
         </div>
@@ -308,11 +356,9 @@ function Header({
           }`}
           title="Manage Email Connection"
         >
-          {/* Use a "User" or "Login" icon style */}
           <span className="text-sm">{username ? "👤" : "🔑"}</span>
           <span>{username ? username : "login"}</span>
         </button>
-
       </div>
     </header>
   );
@@ -496,21 +542,42 @@ function DumpStep({
 function TasksStep({
   loading,
   tasks,
-  onPick,
+  setTasks,
+  onStart,
   onBack,
 }: {
   loading: boolean;
   tasks: string[];
-  onPick: (t: string) => void;
+  setTasks: (t: string[]) => void;
+  onStart: () => void;
   onBack: () => void;
 }) {
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+
+  const updateTask = (index: number, val: string) => {
+    const next = [...tasks];
+    next[index] = val;
+    setTasks(next);
+  };
+
+  const deleteTask = (index: number) => {
+    setTasks(tasks.filter((_, i) => i !== index));
+    if (editingIndex === index) setEditingIndex(null);
+  };
+
+  const addTask = () => {
+    const next = [...tasks, ""];
+    setTasks(next);
+    setEditingIndex(next.length - 1);
+  };
+
   return (
-    <section>
+    <section className="max-w-4xl mx-auto">
       <h1 className="font-display text-3xl sm:text-4xl font-semibold leading-tight mb-3">
-        I heard a few things.
+        I hear you ...
       </h1>
       <p className="text-ink/70 mb-6">
-        Which one are we unsticking right now? Tap one.
+        Review your tasks or add your own. We'll pick the best one to start with.
       </p>
 
       {loading ? (
@@ -527,23 +594,75 @@ function TasksStep({
           <span className="ml-3 text-ink/60">reading the chaos…</span>
         </div>
       ) : (
-        <div className="grid gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {tasks.map((t, i) => (
-            <button
-              key={t + i}
-              onClick={() => onPick(t)}
-              className="chip text-lg"
-            >
-              <span className="text-ink/40 font-mono text-sm mr-3">
-                {String(i + 1).padStart(2, "0")}
-              </span>
-              {t}
-            </button>
+            <div key={i} className="chip h-full min-h-[140px] flex flex-col justify-between group relative overflow-hidden bg-cream p-5">
+              <div className="flex-1">
+                {editingIndex === i ? (
+                  <textarea
+                    autoFocus
+                    value={t}
+                    onChange={(e) => updateTask(i, e.target.value)}
+                    onBlur={() => setEditingIndex(null)}
+                    className="w-full h-full bg-transparent border-none focus:ring-0 focus:outline-none text-lg font-medium resize-none"
+                    placeholder="Describe the task..."
+                  />
+                ) : (
+                  <div className="text-lg font-medium leading-snug break-words">
+                    {t}
+                  </div>
+                )}
+              </div>
+              
+              <div className="flex items-center justify-end gap-1 mt-4 opacity-0 group-hover:opacity-100 transition-opacity">
+                <button
+                  onClick={() => setEditingIndex(i)}
+                  className="p-2 hover:bg-ink/5 rounded-lg transition-colors"
+                  title="Edit task"
+                >
+                  <span role="img" aria-label="edit">✏️</span>
+                </button>
+                <button
+                  onClick={() => deleteTask(i)}
+                  className="p-2 hover:bg-rust/10 rounded-lg transition-colors"
+                  title="Remove task"
+                >
+                  <span role="img" aria-label="delete">🗑️</span>
+                </button>
+              </div>
+            </div>
           ))}
+
+          {/* Add Task Tile */}
+          <button
+            onClick={addTask}
+            className="chip h-full min-h-[140px] flex flex-col items-center justify-center border-dashed border-ink/20 bg-ink/5 hover:bg-ink/10 hover:border-ink/40 transition-all group"
+            title="Add a manual task"
+          >
+            <span className="text-4xl text-ink/40 group-hover:text-ink/60 transition-colors">+</span>
+            <span className="text-xs uppercase tracking-widest text-ink/40 mt-2">Add Task</span>
+          </button>
+
+          {tasks.length === 0 && (
+            <div className="col-span-full text-center py-12 text-ink/40 italic card">
+              No tasks found. Try adding some back or rewriting your dump.
+            </div>
+          )}
         </div>
       )}
 
-      <div className="mt-6">
+      {!loading && tasks.length > 0 && (
+        <div className="mt-10">
+          <button
+            onClick={onStart}
+            className="press-btn w-full bg-ink text-paper font-semibold px-6 py-5 text-xl"
+          >
+            Let's get started →
+          </button>
+        </div>
+      )}
+
+      <div className="mt-8">
         <button
           onClick={onBack}
           className="text-sm text-ink/60 hover:text-ink underline underline-offset-4"
@@ -689,16 +808,21 @@ function TimeBtn({
   );
 }
 
+
 function ActionStep({
   loading,
   result,
   task,
   onReset,
+  onKeepWorking,
+  hasMoreTasks,
 }: {
   loading: boolean;
   result: UnstickResult | null;
   task: string;
   onReset: () => void;
+  onKeepWorking: () => void;
+  hasMoreTasks: boolean;
 }) {
   const dots = useMemo(() => [0, 1, 2], []);
   const [addingToCalendar, setAddingToCalendar] = useState(false);
@@ -1001,6 +1125,14 @@ function ActionStep({
               >
                 start over
               </button>
+              {hasMoreTasks && (
+                <button
+                  onClick={onKeepWorking}
+                  className="press-btn bg-sage text-ink font-semibold px-5 py-3"
+                >
+                  keep working
+                </button>
+              )}
               <button
                 onClick={onAddToCalendar}
                 onMouseEnter={() => setShowCalendarPreview(true)}

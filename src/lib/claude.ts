@@ -25,9 +25,8 @@ const MODEL =
 
 function getApiKey(): string | null {
   const envKey =
-    (import.meta.env.VITE_OPENAI_API_KEY as string | undefined) ||
-    // Keep backward compatibility for existing local setups.
-    (import.meta.env.VITE_ANTHROPIC_API_KEY as string | undefined);
+    (import.meta.env.VITE_OPENAI_API_KEY as string | undefined)?.trim() ||
+    (import.meta.env.VITE_ANTHROPIC_API_KEY as string | undefined)?.trim();
   const localKey =
     typeof window !== "undefined"
       ? window.localStorage.getItem("OPENAI_API_KEY") ||
@@ -113,8 +112,9 @@ export async function transcribeAudio(audioBlob: Blob): Promise<string> {
   const apiKey = getApiKey();
   if (!apiKey) throw new Error("No API key found.");
 
+  const ext = audioBlob.type.includes("mp4") ? "m4a" : "webm";
   const formData = new FormData();
-  formData.append("file", audioBlob, "recording.webm");
+  formData.append("file", audioBlob, `recording.${ext}`);
   formData.append("model", "whisper-1");
 
   const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
@@ -122,7 +122,16 @@ export async function transcribeAudio(audioBlob: Blob): Promise<string> {
     headers: { Authorization: `Bearer ${apiKey}` },
     body: formData,
   });
-  if (!res.ok) throw new Error(`Transcription failed (${res.status}).`);
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(
+      `Transcription failed (${res.status}): ${
+        errorData.error?.message || "Unknown error"
+      }`
+    );
+  }
+
   const data = (await res.json()) as { text?: string };
   return data.text?.trim() || "";
 }
@@ -140,8 +149,9 @@ thing they're trying to start right now. You are not a planner. You are not a co
 
 Rules:
 - Reply ONLY with JSON: {"tasks": ["...", "..."]}
-- Include every concrete task the user mentions. Do not cap the list.
-- Each item: 3-6 words. Starts lowercase. No trailing punctuation. No emoji.
+- Include EVERY distinct concrete task or project the user mentions. Do not summarize multiple tasks into one.
+- If the user provides a list, include every item in that list.
+- Each item: 3-8 words. Starts lowercase. No trailing punctuation. No emoji.
 - Concrete and specific, using nouns FROM the user's own dump. Not a category.
 - Good: "email professor about extension". Bad: "the writing thing" or "school stuff".
 - Skip venting and feelings. Pull out the actual task or decision hiding in the mess.
@@ -349,6 +359,16 @@ function classifyTask(text: string): TaskKind {
 }
 
 function fallbackTasks(dump: string): string[] {
+  // First, try to split by lines or bullets if it looks like a list
+  const lines = dump.split(/\n+/).map(l => l.trim()).filter(l => l.length > 5);
+  const potentialTasks = lines
+    .map(l => l.replace(/^[-*•\d.]+\s*/, "").trim())
+    .filter(l => l.length > 5 && !l.includes("?"));
+
+  if (potentialTasks.length >= 2) {
+    return potentialTasks;
+  }
+
   const lower = dump.toLowerCase();
   const guesses: string[] = [];
   const patterns: [RegExp, string][] = [
