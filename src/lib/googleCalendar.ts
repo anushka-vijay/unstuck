@@ -1,5 +1,7 @@
 interface GoogleTokenResponse {
   access_token: string;
+  expires_in?: number;
+  scope?: string;
   error?: string;
 }
 
@@ -25,6 +27,43 @@ declare global {
 }
 
 let googleScriptPromise: Promise<void> | null = null;
+const GOOGLE_OAUTH_TOKEN_CACHE_KEY = "GOOGLE_OAUTH_TOKEN_CACHE";
+
+interface TokenCache {
+  accessToken: string;
+  expiresAtMs: number;
+  scopes: string[];
+}
+
+function readTokenCache(): TokenCache | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.localStorage.getItem(GOOGLE_OAUTH_TOKEN_CACHE_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as TokenCache;
+    if (
+      !parsed ||
+      typeof parsed.accessToken !== "string" ||
+      typeof parsed.expiresAtMs !== "number" ||
+      !Array.isArray(parsed.scopes)
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeTokenCache(cache: TokenCache): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(GOOGLE_OAUTH_TOKEN_CACHE_KEY, JSON.stringify(cache));
+}
+
+function hasAllScopes(granted: string[], requiredScopeString: string): boolean {
+  const required = requiredScopeString.split(/\s+/).filter(Boolean);
+  return required.every((s) => granted.includes(s));
+}
 
 function loadGoogleScript(): Promise<void> {
   if (window.google?.accounts?.oauth2) return Promise.resolve();
@@ -59,46 +98,69 @@ function loadGoogleScript(): Promise<void> {
 async function getCalendarAccessToken(
   clientId: string,
   scope: string,
-  prompt: string = "select_account"
+  _prompt: string = "select_account"
 ): Promise<string> {
+  const cached = readTokenCache();
+  if (
+    cached &&
+    cached.expiresAtMs > Date.now() + 30_000 &&
+    hasAllScopes(cached.scopes, scope)
+  ) {
+    return cached.accessToken;
+  }
+
   await loadGoogleScript();
   const oauth = window.google?.accounts?.oauth2;
   if (!oauth) throw new Error("Google OAuth client not available.");
 
-  return new Promise<string>((resolve, reject) => {
-    const tokenClient = oauth.initTokenClient({
-      client_id: clientId,
-      scope,
-      callback: (resp: GoogleTokenResponse) => {
-        if (resp.error) {
-          reject(new Error(`Google OAuth failed: ${resp.error}`));
-          return;
-        }
-        if (!resp.access_token) {
-          reject(new Error("Google OAuth did not return an access token."));
-          return;
-        }
-        resolve(resp.access_token);
-      },
-      error_callback: (err: GoogleTokenError) => {
-        const type = err.type || "unknown";
-        if (type === "popup_failed_to_open") {
-          reject(
-            new Error(
-              "Google sign-in popup was blocked. Allow popups for localhost and try again."
-            )
-          );
-          return;
-        }
-        if (type === "popup_closed") {
-          reject(new Error("Google sign-in popup was closed before completion."));
-          return;
-        }
-        reject(new Error(`Google OAuth failed: ${type}`));
-      },
+  const requestToken = (prompt: string) =>
+    new Promise<string>((resolve, reject) => {
+      const tokenClient = oauth.initTokenClient({
+        client_id: clientId,
+        scope,
+        callback: (resp: GoogleTokenResponse) => {
+          if (resp.error) {
+            reject(new Error(`Google OAuth failed: ${resp.error}`));
+            return;
+          }
+          if (!resp.access_token) {
+            reject(new Error("Google OAuth did not return an access token."));
+            return;
+          }
+          const scopes = (resp.scope || scope).split(/\s+/).filter(Boolean);
+          const expiresIn = resp.expires_in ?? 3600;
+          writeTokenCache({
+            accessToken: resp.access_token,
+            expiresAtMs: Date.now() + Math.max(30, expiresIn - 30) * 1000,
+            scopes,
+          });
+          resolve(resp.access_token);
+        },
+        error_callback: (err: GoogleTokenError) => {
+          const type = err.type || "unknown";
+          if (type === "popup_failed_to_open") {
+            reject(
+              new Error(
+                "Google sign-in popup was blocked. Allow popups for localhost and try again."
+              )
+            );
+            return;
+          }
+          if (type === "popup_closed") {
+            reject(new Error("Google sign-in popup was closed before completion."));
+            return;
+          }
+          reject(new Error(`Google OAuth failed: ${type}`));
+        },
+      });
+      tokenClient.requestAccessToken({ prompt });
     });
-    tokenClient.requestAccessToken({ prompt });
-  });
+
+  try {
+    return await requestToken("");
+  } catch {
+    return requestToken("consent");
+  }
 }
 
 function buildEventWindow() {

@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   extractTasks,
   getUnstickAction,
-  hasApiKey,
   transcribeAudio,
   type BrainImage,
   type Energy,
@@ -452,7 +451,7 @@ function DumpStep({
           onChange={(e) => onChange(e.target.value)}
           onPaste={handlePasteImages}
           placeholder="ugh i have to email my prof and the thing due friday and i haven't eaten and i don't know where to start"
-          className="w-full h-48 sm:h-56 resize-none bg-cream p-5 font-body text-lg leading-relaxed focus:outline-none placeholder:text-ink/30"
+          className="w-full h-48 sm:h-56 resize-none rounded-lg bg-cream p-5 font-body text-lg leading-relaxed focus:outline-none placeholder:text-ink/30"
           onKeyDown={(e) => {
             if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && canGo) {
               onNext();
@@ -462,10 +461,15 @@ function DumpStep({
       </div>
 
       <div className="flex flex-wrap items-center gap-2 mb-5">
-        <label className="press-btn bg-paper px-4 py-2 text-sm cursor-pointer">
-          <span className="text-lg leading-none" aria-label="add image">
-            📷
-          </span>
+        <label
+          className="cursor-pointer text-4xl leading-none hover:opacity-70 transition-opacity"
+          title="Add image"
+        >
+          <img
+            src="/icon-camera.png"
+            alt="add image"
+            className="w-11 h-11 object-contain"
+          />
           <input
             type="file"
             accept="image/*"
@@ -476,13 +480,20 @@ function DumpStep({
         </label>
         <button
           onClick={() => void onToggleMic()}
-          className={`press-btn px-4 py-2 text-sm ${
-            isRecording ? "bg-rust text-paper" : "bg-paper text-ink"
+          className={`text-4xl leading-none transition-opacity ${
+            isRecording ? "opacity-100" : "hover:opacity-70"
           }`}
           aria-label={isRecording ? "stop recording" : "start voice input"}
           title={isRecording ? "Stop recording" : "Start voice input"}
         >
-          <span className="text-lg leading-none">🎤</span>
+          <img
+            src="/icon-mic.png"
+            alt={isRecording ? "stop recording" : "start voice input"}
+            className={
+              "w-12 h-11 object-contain " +
+              (isRecording ? "opacity-100" : "")
+            }
+          />
         </button>
         {isTranscribing && (
           <span className="text-xs text-ink/60 font-mono">transcribing…</span>
@@ -815,8 +826,13 @@ function ActionStep({
 }) {
   const dots = useMemo(() => [0, 1, 2], []);
   const [addingToCalendar, setAddingToCalendar] = useState(false);
+  const [calendarAdded, setCalendarAdded] = useState(false);
   const [calendarStatus, setCalendarStatus] = useState<string | null>(null);
   const [showCalendarPreview, setShowCalendarPreview] = useState(false);
+  const [timerTotalSec, setTimerTotalSec] = useState(0);
+  const [secondsLeft, setSecondsLeft] = useState(0);
+  const [timerRunning, setTimerRunning] = useState(false);
+  const [timerEditValue, setTimerEditValue] = useState("05:00");
   const googleClientId = (
     import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined
   )?.trim();
@@ -825,6 +841,182 @@ function ActionStep({
     [result, task]
   );
 
+  function parseTimerSeconds(actionText: string): number {
+    const lower = actionText.toLowerCase();
+    if (!/\b(timer|countdown)\b/.test(lower)) return 0;
+
+    function unitToSeconds(value: number, unit: string): number {
+      if (unit.startsWith("h")) return value * 3600;
+      if (unit.startsWith("m")) return value * 60;
+      return value;
+    }
+
+    // Colon-based time inside action text: hh:mm:ss or mm:ss
+    const colon = lower.match(/\b(\d{1,2}):(\d{2})(?::(\d{2}))?\b/);
+    if (colon) {
+      if (colon[3] !== undefined) {
+        const hh = Number(colon[1]);
+        const mm = Number(colon[2]);
+        const ss = Number(colon[3]);
+        if (mm <= 59 && ss <= 59) {
+          const total = hh * 3600 + mm * 60 + ss;
+          if (total > 0) return total;
+        }
+      } else {
+        const mm = Number(colon[1]);
+        const ss = Number(colon[2]);
+        if (ss <= 59) {
+          const total = mm * 60 + ss;
+          if (total > 0) return total;
+        }
+      }
+    }
+
+    // Unit-based durations (supports combinations like "1 hour 20 minutes")
+    const unitMatches = [
+      ...lower.matchAll(
+        /(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours|m|min|mins|minute|minutes|s|sec|secs|second|seconds)\b/g
+      ),
+    ];
+    if (unitMatches.length > 0) {
+      let total = 0;
+      for (const match of unitMatches) {
+        const n = Number(match[1]);
+        const u = match[2];
+        if (Number.isNaN(n) || n < 0) continue;
+        total += unitToSeconds(n, u);
+      }
+      if (total > 0) return Math.round(total);
+    }
+
+    // Fallback: if "timer" is mentioned without parseable duration
+    return 5 * 60;
+  }
+
+  function formatSeconds(total: number): string {
+    const hours = Math.floor(total / 3600);
+    const mins = Math.floor((total % 3600) / 60)
+      .toString()
+      .padStart(2, "0");
+    const secs = Math.floor(total % 60)
+      .toString()
+      .padStart(2, "0");
+    return hours > 0 ? `${hours}:${mins}:${secs}` : `${mins}:${secs}`;
+  }
+
+  function parseTimerInput(value: string): number | null {
+    const v = value.trim().toLowerCase();
+    if (!v) return null;
+
+    // Google-timer-like natural formats: "90", "5m", "1h 20m", "45s"
+    const unitMatches = [...v.matchAll(/(\d+)\s*(h|hr|hrs|hour|hours|m|min|mins|minute|minutes|s|sec|secs|second|seconds)\b/g)];
+    if (unitMatches.length > 0) {
+      let total = 0;
+      for (const match of unitMatches) {
+        const n = Number(match[1]);
+        const u = match[2];
+        if (Number.isNaN(n) || n < 0) return null;
+        if (u.startsWith("h")) total += n * 3600;
+        else if (u.startsWith("m")) total += n * 60;
+        else total += n;
+      }
+      return total > 0 ? total : null;
+    }
+
+    // Colon formats: mm:ss OR hh:mm:ss (like Google timer)
+    if (v.includes(":")) {
+      const parts = v.split(":");
+      if (parts.length === 2) {
+        const mm = Number(parts[0]);
+        const ss = Number(parts[1]);
+        if (Number.isNaN(mm) || Number.isNaN(ss) || ss < 0 || ss > 59 || mm < 0)
+          return null;
+        const total = mm * 60 + ss;
+        return total > 0 ? total : null;
+      }
+      if (parts.length === 3) {
+        const hh = Number(parts[0]);
+        const mm = Number(parts[1]);
+        const ss = Number(parts[2]);
+        if (
+          Number.isNaN(hh) ||
+          Number.isNaN(mm) ||
+          Number.isNaN(ss) ||
+          hh < 0 ||
+          mm < 0 ||
+          mm > 59 ||
+          ss < 0 ||
+          ss > 59
+        ) {
+          return null;
+        }
+        const total = hh * 3600 + mm * 60 + ss;
+        return total > 0 ? total : null;
+      }
+      return null;
+    }
+
+    // Bare number = minutes
+    if (/^\d+$/.test(v)) {
+      const mins = Number(v);
+      return mins > 0 ? mins * 60 : null;
+    }
+    return null;
+  }
+
+  function playTimerDoneSound() {
+    const Ctx = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+    const beep = (startAt: number, freq: number) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, startAt);
+      gain.gain.exponentialRampToValueAtTime(0.2, startAt + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.22);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(startAt);
+      osc.stop(startAt + 0.24);
+    };
+    const t = ctx.currentTime + 0.02;
+    beep(t, 880);
+    beep(t + 0.28, 988);
+  }
+
+  useEffect(() => {
+    const suggestedSeconds = parseTimerSeconds(result?.action || "");
+    setTimerTotalSec(suggestedSeconds);
+    setSecondsLeft(suggestedSeconds);
+    setTimerRunning(false);
+    setTimerEditValue(formatSeconds(suggestedSeconds));
+    setCalendarAdded(false);
+    setCalendarStatus(null);
+  }, [result?.action]);
+
+  useEffect(() => {
+    if (!timerRunning || secondsLeft <= 0) return;
+    const id = window.setInterval(() => {
+      setSecondsLeft((prev) => {
+        if (prev <= 1) {
+          setTimerRunning(false);
+          playTimerDoneSound();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [timerRunning, secondsLeft]);
+
+  useEffect(() => {
+    if (!timerRunning) {
+      setTimerEditValue(formatSeconds(secondsLeft));
+    }
+  }, [secondsLeft, timerRunning]);
+
   async function onAddToCalendar() {
     if (!googleClientId || !result) return;
     setAddingToCalendar(true);
@@ -832,6 +1024,7 @@ function ActionStep({
     try {
       await addTaskToGoogleCalendar(googleClientId, result.action || task);
       setCalendarStatus("Added to your Google Calendar.");
+      setCalendarAdded(true);
     } catch (err) {
       setCalendarStatus(
         err instanceof Error ? err.message : "Failed to add calendar event."
@@ -869,6 +1062,58 @@ function ActionStep({
           <div className="border-l-[3px] border-ink pl-4 mb-8 text-ink/80 italic">
             {result.validation}
           </div>
+          {timerTotalSec > 0 && (
+            <div className="card bg-paper p-4 mb-6">
+              <div className="text-[10px] uppercase tracking-[0.2em] font-bold text-ink/40 mb-2">
+                Suggested Timer
+              </div>
+              <input
+                value={timerRunning ? formatSeconds(secondsLeft) : timerEditValue}
+                onChange={(e) => {
+                  if (!timerRunning) setTimerEditValue(e.target.value);
+                }}
+                onBlur={() => {
+                  if (timerRunning) return;
+                  const parsed = parseTimerInput(timerEditValue);
+                  if (parsed) {
+                    setTimerTotalSec(parsed);
+                    setSecondsLeft(parsed);
+                    setTimerRunning(false);
+                    setTimerEditValue(formatSeconds(parsed));
+                  } else {
+                    setTimerEditValue(formatSeconds(secondsLeft));
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    (e.currentTarget as HTMLInputElement).blur();
+                  }
+                }}
+                disabled={timerRunning}
+                className="font-mono text-3xl mb-3 bg-transparent border-0 p-0 focus:outline-none w-40"
+                title="Use 90, 5m, 1:30, or 1:02:03"
+                placeholder="mm:ss"
+              />
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setTimerRunning((v) => !v)}
+                  className="press-btn bg-ink text-paper px-4 py-2 text-sm font-semibold"
+                  disabled={secondsLeft === 0}
+                >
+                  {timerRunning ? "pause" : "start"}
+                </button>
+                <button
+                  onClick={() => {
+                    setSecondsLeft(timerTotalSec);
+                    setTimerRunning(false);
+                  }}
+                  className="press-btn bg-paper text-ink px-4 py-2 text-sm font-semibold"
+                >
+                  reset
+                </button>
+              </div>
+            </div>
+          )}
           <div
             className="relative"
             onMouseLeave={() => setShowCalendarPreview(false)}
@@ -893,15 +1138,22 @@ function ActionStep({
                 onMouseEnter={() => setShowCalendarPreview(true)}
                 onFocus={() => setShowCalendarPreview(true)}
                 onBlur={() => setShowCalendarPreview(false)}
-                disabled={!googleClientId || addingToCalendar}
-                className="press-btn bg-rust text-paper font-semibold px-5 py-3"
+                disabled={!googleClientId || addingToCalendar || calendarAdded}
+                className={
+                  "press-btn font-semibold px-5 py-3 " +
+                  (calendarAdded ? "bg-sage/60 text-ink/70" : "bg-sage text-ink")
+                }
                 title={
                   googleClientId
                     ? "Add this task to Google Calendar"
                     : "Missing VITE_GOOGLE_CLIENT_ID"
                 }
               >
-                {addingToCalendar ? "adding to calendar..." : "add to calendar"}
+                {addingToCalendar
+                  ? "adding to calendar..."
+                  : calendarAdded
+                  ? "added"
+                  : "add to calendar"}
               </button>
               <div className="text-sm text-ink/50 sm:ml-auto sm:self-center">
                 no streak. no score. close the tab when you're done.
@@ -947,6 +1199,57 @@ function Footer() {
   );
 }
 
+function KeyModal({ onClose }: { onClose: () => void }) {
+  const [value, setValue] = useState(
+    (typeof window !== "undefined" &&
+      (window.localStorage.getItem("OPENAI_API_KEY") ||
+        window.localStorage.getItem("ANTHROPIC_API_KEY"))) ||
+      ""
+  );
+  return (
+    <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm flex items-center justify-center p-5 z-50">
+      <div className="card bg-cream w-full max-w-md p-6">
+        <div className="font-display text-2xl font-semibold mb-2">
+          Live mode
+        </div>
+        <p className="text-sm text-ink/70 mb-4">
+          Paste an OpenAI API key to run with real model responses. Stored
+          in your browser only. Leave empty to use demo-mode fallbacks.
+        </p>
+        <input
+          type="password"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="sk-..."
+          className="w-full border-[3px] border-ink rounded-lg bg-paper p-3 font-mono text-sm focus:outline-none mb-4"
+        />
+        <div className="flex gap-3 justify-end">
+          <button
+            onClick={() => {
+              window.localStorage.removeItem("OPENAI_API_KEY");
+              window.localStorage.removeItem("ANTHROPIC_API_KEY");
+              onClose();
+            }}
+            className="press-btn bg-paper text-ink font-semibold px-4 py-2 text-sm"
+          >
+            clear
+          </button>
+          <button
+            onClick={() => {
+              if (value.trim()) {
+                window.localStorage.setItem("OPENAI_API_KEY", value.trim());
+              }
+              onClose();
+            }}
+            className="press-btn bg-ink text-paper font-semibold px-4 py-2 text-sm"
+          >
+            save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function EmailModal({
   connection,
@@ -988,7 +1291,7 @@ function EmailModal({
 
   return (
     <div className="fixed inset-0 bg-ink/40 backdrop-blur-md flex items-center justify-center p-5 z-50">
-      <div className="card bg-paper w-full max-w-xl p-8 shadow-2xl border-[3px] border-ink">
+      <div className="card bg-paper w-full max-w-xl p-8 border-[3px] border-ink">
         {/* Header Section */}
         <div className="mb-8">
           <h2 className="font-display text-3xl font-bold tracking-tight mb-2 text-ink">
@@ -1014,7 +1317,7 @@ function EmailModal({
                 }
               }}
               disabled={connecting || !googleClientId}
-              className={`flex items-center gap-4 p-4 border-[3px] transition-all text-left ${
+              className={`flex items-center gap-4 p-4 border-[3px] rounded-lg transition-all text-left ${
                 provider === "gmail" 
                   ? "border-ink bg-mustard shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]" 
                   : "border-ink/10 bg-cream hover:border-ink/30"
@@ -1030,7 +1333,7 @@ function EmailModal({
             </button>
 
             {/* Outlook Option (Disabled/Coming Soon) */}
-            <div className="flex items-center gap-4 p-4 border-[3px] border-ink/5 bg-ink/[0.02] cursor-not-allowed grayscale opacity-50 relative overflow-hidden">
+            <div className="flex items-center gap-4 p-4 border-[3px] rounded-lg border-ink/5 bg-ink/[0.02] cursor-not-allowed grayscale opacity-50 relative overflow-hidden">
               <span className="text-2xl">📧</span>
               <div>
                 <div className="font-bold font-display text-ink/40">Outlook</div>
