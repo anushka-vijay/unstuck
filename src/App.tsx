@@ -7,10 +7,49 @@ import {
   type Minutes,
   type UnstickResult,
 } from "./lib/claude";
+import {
+  connectGoogleEmail,
+  type InboxPreviewItem,
+} from "./lib/emailOAuth";
 
 type Step = "dump" | "tasks" | "setup" | "action";
+type EmailProvider = "gmail" | "outlook";
+
+interface EmailConnection {
+  provider: EmailProvider;
+  email: string;
+  connectedAt: string;
+  inboxPreview: InboxPreviewItem[];
+}
 
 const ESCAPE_TASK = "something else entirely";
+const EMAIL_CONNECTION_KEY = "EMAIL_OAUTH_CONNECTION";
+
+function readEmailConnection(): EmailConnection | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.localStorage.getItem(EMAIL_CONNECTION_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<EmailConnection>;
+    if (
+      !parsed ||
+      (parsed.provider !== "gmail" && parsed.provider !== "outlook") ||
+      typeof parsed.email !== "string" ||
+      typeof parsed.connectedAt !== "string" ||
+      !Array.isArray(parsed.inboxPreview)
+    ) {
+      return null;
+    }
+    return {
+      provider: parsed.provider,
+      email: parsed.email,
+      connectedAt: parsed.connectedAt,
+      inboxPreview: parsed.inboxPreview as InboxPreviewItem[],
+    };
+  } catch {
+    return null;
+  }
+}
 
 export default function App() {
   const [step, setStep] = useState<Step>("dump");
@@ -26,6 +65,10 @@ export default function App() {
   const [loadingAction, setLoadingAction] = useState(false);
   const [showKeyModal, setShowKeyModal] = useState(false);
   const [apiReady, setApiReady] = useState(hasApiKey());
+  const [showEmailModal, setShowEmailModal] = useState(false);
+  const [emailConnection, setEmailConnection] = useState<EmailConnection | null>(
+    readEmailConnection()
+  );
 
   const stepIndex: Record<Step, number> = {
     dump: 0,
@@ -84,7 +127,9 @@ export default function App() {
     <div className="min-h-full flex flex-col">
       <Header
         apiReady={apiReady}
+        emailConnected={!!emailConnection}
         onConfigureKey={() => setShowKeyModal(true)}
+        onConfigureEmail={() => setShowEmailModal(true)}
       />
 
       <main className="flex-1 w-full max-w-2xl mx-auto px-5 pb-24">
@@ -137,16 +182,28 @@ export default function App() {
           }}
         />
       )}
+      {showEmailModal && (
+        <EmailModal
+          connection={emailConnection}
+          onClose={() => setShowEmailModal(false)}
+          onConnect={(next) => setEmailConnection(next)}
+          onDisconnect={() => setEmailConnection(null)}
+        />
+      )}
     </div>
   );
 }
 
 function Header({
   apiReady,
+  emailConnected,
   onConfigureKey,
+  onConfigureEmail,
 }: {
   apiReady: boolean;
+  emailConnected: boolean;
   onConfigureKey: () => void;
+  onConfigureEmail: () => void;
 }) {
   return (
     <header className="w-full max-w-2xl mx-auto px-5 pt-8 pb-6 flex items-center justify-between">
@@ -161,13 +218,22 @@ function Header({
           </div>
         </div>
       </div>
-      <button
-        onClick={onConfigureKey}
-        className="text-xs font-mono px-3 py-2 border-2 border-ink/20 hover:border-ink rounded-full transition-colors"
-        title="Configure Anthropic API key"
-      >
-        {apiReady ? "● live" : "○ demo mode"}
-      </button>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={onConfigureEmail}
+          className="text-xs font-mono px-3 py-2 border-2 border-ink/20 hover:border-ink rounded-full transition-colors"
+          title="Configure email integration demo"
+        >
+          {emailConnected ? "✉ email connected" : "✉ connect email"}
+        </button>
+        <button
+          onClick={onConfigureKey}
+          className="text-xs font-mono px-3 py-2 border-2 border-ink/20 hover:border-ink rounded-full transition-colors"
+          title="Configure OpenAI API key"
+        >
+          {apiReady ? "● live" : "○ demo mode"}
+        </button>
+      </div>
     </header>
   );
 }
@@ -503,7 +569,7 @@ function Footer() {
   return (
     <footer className="w-full max-w-2xl mx-auto px-5 py-6 text-xs text-ink/40 font-mono flex flex-wrap gap-x-4 gap-y-1 justify-between">
       <span>built for brains that can't start.</span>
-      <span>powered by claude</span>
+      <span>powered by openai</span>
     </footer>
   );
 }
@@ -511,7 +577,8 @@ function Footer() {
 function KeyModal({ onClose }: { onClose: () => void }) {
   const [value, setValue] = useState(
     (typeof window !== "undefined" &&
-      window.localStorage.getItem("ANTHROPIC_API_KEY")) ||
+      (window.localStorage.getItem("OPENAI_API_KEY") ||
+        window.localStorage.getItem("ANTHROPIC_API_KEY"))) ||
       ""
   );
   return (
@@ -521,19 +588,20 @@ function KeyModal({ onClose }: { onClose: () => void }) {
           Live mode
         </div>
         <p className="text-sm text-ink/70 mb-4">
-          Paste an Anthropic API key to run with real Claude responses. Stored
+          Paste an OpenAI API key to run with real model responses. Stored
           in your browser only. Leave empty to use demo-mode fallbacks.
         </p>
         <input
           type="password"
           value={value}
           onChange={(e) => setValue(e.target.value)}
-          placeholder="sk-ant-..."
+          placeholder="sk-..."
           className="w-full border-[3px] border-ink bg-paper p-3 font-mono text-sm focus:outline-none mb-4"
         />
         <div className="flex gap-3 justify-end">
           <button
             onClick={() => {
+              window.localStorage.removeItem("OPENAI_API_KEY");
               window.localStorage.removeItem("ANTHROPIC_API_KEY");
               onClose();
             }}
@@ -544,16 +612,156 @@ function KeyModal({ onClose }: { onClose: () => void }) {
           <button
             onClick={() => {
               if (value.trim()) {
-                window.localStorage.setItem(
-                  "ANTHROPIC_API_KEY",
-                  value.trim()
-                );
+                window.localStorage.setItem("OPENAI_API_KEY", value.trim());
               }
               onClose();
             }}
             className="press-btn bg-ink text-paper font-semibold px-4 py-2 text-sm"
           >
             save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EmailModal({
+  connection,
+  onConnect,
+  onDisconnect,
+  onClose,
+}: {
+  connection: EmailConnection | null;
+  onConnect: (next: EmailConnection) => void;
+  onDisconnect: () => void;
+  onClose: () => void;
+}) {
+  const [provider, setProvider] = useState<EmailProvider>(
+    connection?.provider ?? "gmail"
+  );
+  const [connecting, setConnecting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const providerLabel = provider === "gmail" ? "Gmail" : "Outlook";
+  const googleClientId = (import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined)?.trim();
+  const canConnect = provider === "gmail" ? !!googleClientId : false;
+
+  async function handleConnect() {
+    if (!canConnect || provider !== "gmail" || !googleClientId) return;
+    setError(null);
+    setConnecting(true);
+    try {
+      const oauth = await connectGoogleEmail(googleClientId);
+      const next: EmailConnection = {
+        provider: "gmail",
+        email: oauth.email,
+        connectedAt: new Date().toISOString(),
+        inboxPreview: oauth.inboxPreview,
+      };
+      window.localStorage.setItem(EMAIL_CONNECTION_KEY, JSON.stringify(next));
+      onConnect(next);
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : "OAuth failed. Please try again.";
+      setError(msg);
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  function handleDisconnect() {
+    window.localStorage.removeItem(EMAIL_CONNECTION_KEY);
+    onDisconnect();
+  }
+
+  return (
+    <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm flex items-center justify-center p-5 z-50">
+      <div className="card bg-cream w-full max-w-xl p-6">
+        <div className="font-display text-2xl font-semibold mb-2">
+          Email integration
+        </div>
+        <p className="text-sm text-ink/70 mb-5">
+          Connect with real OAuth. Gmail uses Google OAuth + Gmail API in the browser.
+        </p>
+        <div className="text-xs text-ink/60 mb-4">
+          No typing needed in this modal. Click <span className="font-semibold">connect Gmail</span> to open the Google sign-in popup.
+        </div>
+
+        <div className="grid sm:grid-cols-2 gap-3 mb-4">
+          <button
+            onClick={() => setProvider("gmail")}
+            className={"chip text-center " + (provider === "gmail" ? "selected" : "")}
+          >
+            connect Gmail
+          </button>
+          <button
+            onClick={() => setProvider("outlook")}
+            className={"chip text-center " + (provider === "outlook" ? "selected" : "")}
+          >
+            Outlook (next)
+          </button>
+        </div>
+        {provider === "gmail" && !googleClientId && (
+          <div className="card bg-paper p-4 mb-5 text-sm text-ink/70">
+            Missing `VITE_GOOGLE_CLIENT_ID` in `.env.local`. Add a Google OAuth
+            Web Client ID, then restart `npm run dev`.
+          </div>
+        )}
+        {provider === "outlook" && (
+          <div className="card bg-paper p-4 mb-5 text-sm text-ink/70">
+            Outlook OAuth is not wired yet. Use Gmail for the live demo right now.
+          </div>
+        )}
+        {error && (
+          <div className="card bg-paper p-4 mb-5 text-sm text-rust">{error}</div>
+        )}
+
+        <div className="card bg-paper p-4 mb-5">
+          <div className="text-xs uppercase tracking-widest text-ink/50 mb-3">
+            Connected inbox preview
+          </div>
+          {connection ? (
+            <div className="space-y-2 text-sm">
+              <div className="font-mono text-ink/70">
+                {connection.provider} · {connection.email}
+              </div>
+              {connection.inboxPreview.map((m) => (
+                <div key={m.from + m.subject} className="border-t-2 border-ink/10 pt-2">
+                  <div className="font-semibold">{m.subject}</div>
+                  <div className="text-ink/60">from {m.from}</div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-sm text-ink/60">
+              No account connected yet. Click connect to start real OAuth with{" "}
+              {providerLabel}.
+            </div>
+          )}
+        </div>
+
+        <div className="flex flex-wrap gap-3 justify-end">
+          {connection && (
+            <button
+              onClick={handleDisconnect}
+              className="press-btn bg-paper text-ink font-semibold px-4 py-2 text-sm"
+            >
+              disconnect
+            </button>
+          )}
+          <button
+            onClick={onClose}
+            className="press-btn bg-paper text-ink font-semibold px-4 py-2 text-sm"
+          >
+            close
+          </button>
+          <button
+            onClick={handleConnect}
+            disabled={!canConnect || connecting}
+            className="press-btn bg-ink text-paper font-semibold px-4 py-2 text-sm"
+          >
+            {connecting ? `connecting to ${providerLabel}...` : `connect ${providerLabel}`}
           </button>
         </div>
       </div>

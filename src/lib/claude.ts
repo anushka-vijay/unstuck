@@ -1,5 +1,3 @@
-import Anthropic from "@anthropic-ai/sdk";
-
 export type Energy = "fumes" | "kinda" | "awake";
 export type Minutes = 5 | 15 | 30;
 
@@ -15,20 +13,56 @@ export interface UnstickResult {
   validation: string;
 }
 
-const MODEL = "claude-sonnet-4-5";
+const MODEL =
+  (import.meta.env.VITE_OPENAI_MODEL as string | undefined) || "gpt-4o-mini";
 
-function getClient(): Anthropic | null {
-  const apiKey =
-    (import.meta.env.VITE_ANTHROPIC_API_KEY as string | undefined) ||
-    (typeof window !== "undefined"
-      ? window.localStorage.getItem("ANTHROPIC_API_KEY") || undefined
-      : undefined);
+function getApiKey(): string | null {
+  const envKey =
+    (import.meta.env.VITE_OPENAI_API_KEY as string | undefined) ||
+    // Keep backward compatibility for existing local setups.
+    (import.meta.env.VITE_ANTHROPIC_API_KEY as string | undefined);
+  const localKey =
+    typeof window !== "undefined"
+      ? window.localStorage.getItem("OPENAI_API_KEY") ||
+        window.localStorage.getItem("ANTHROPIC_API_KEY") ||
+        undefined
+      : undefined;
+  return envKey || localKey || null;
+}
+
+async function chatJson(system: string, user: string): Promise<unknown> {
+  const apiKey = getApiKey();
   if (!apiKey) return null;
-  return new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
+
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: MODEL,
+      temperature: 0.3,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+    }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`OpenAI request failed: ${res.status}`);
+  }
+
+  const data = await res.json();
+  const content = data?.choices?.[0]?.message?.content;
+  if (typeof content !== "string" || !content.trim()) return null;
+  return JSON.parse(stripCodeFence(content));
 }
 
 export function hasApiKey(): boolean {
-  return !!getClient();
+  return !!getApiKey();
 }
 
 function stripCodeFence(text: string): string {
@@ -63,19 +97,12 @@ Dump: "kitchen is disgusting and my mom texted tuesday and laundry is piling up"
 → {"tasks": ["reply to mom's text", "start the laundry", "clean the kitchen"]}`;
 
 export async function extractTasks(dump: string): Promise<string[]> {
-  const client = getClient();
-  if (!client) return fallbackTasks(dump);
+  if (!getApiKey()) return fallbackTasks(dump);
   try {
-    const resp = await client.messages.create({
-      model: MODEL,
-      max_tokens: 300,
-      system: TASK_EXTRACT_SYSTEM,
-      messages: [{ role: "user", content: dump }],
-    });
-    const block = resp.content.find((c) => c.type === "text");
-    if (!block || block.type !== "text") return fallbackTasks(dump);
-    const parsed = JSON.parse(stripCodeFence(block.text));
-    const tasks: unknown = parsed?.tasks;
+    const parsed = await chatJson(TASK_EXTRACT_SYSTEM, dump);
+    if (!parsed || typeof parsed !== "object") return fallbackTasks(dump);
+    const payload = parsed as Record<string, unknown>;
+    const tasks: unknown = payload.tasks;
     if (!Array.isArray(tasks)) return fallbackTasks(dump);
     return tasks
       .filter((t): t is string => typeof t === "string")
@@ -161,8 +188,7 @@ Energy: kinda (kinda here)  Time: 5
 export async function getUnstickAction(
   input: UnstickInput
 ): Promise<UnstickResult> {
-  const client = getClient();
-  if (!client) return fallbackAction(input);
+  if (!getApiKey()) return fallbackAction(input);
 
   const energyLabel = {
     fumes: "fumes (running on fumes, barely here)",
@@ -182,18 +208,13 @@ ${input.dump}
 Give them ONE embarrassingly small, concrete, physical first step. Name specific apps, docs, people, or objects from their dump. Include a stop condition so they know when they're done with this step. Reply with JSON only.`;
 
   try {
-    const resp = await client.messages.create({
-      model: MODEL,
-      max_tokens: 600,
-      system: ACTION_SYSTEM,
-      messages: [{ role: "user", content: userMsg }],
-    });
-    const block = resp.content.find((c) => c.type === "text");
-    if (!block || block.type !== "text") return fallbackAction(input);
-    const parsed = JSON.parse(stripCodeFence(block.text));
-    const action = typeof parsed?.action === "string" ? parsed.action.trim() : "";
+    const parsed = await chatJson(ACTION_SYSTEM, userMsg);
+    if (!parsed || typeof parsed !== "object") return fallbackAction(input);
+    const payload = parsed as Record<string, unknown>;
+    const action =
+      typeof payload.action === "string" ? payload.action.trim() : "";
     const validation =
-      typeof parsed?.validation === "string" ? parsed.validation.trim() : "";
+      typeof payload.validation === "string" ? payload.validation.trim() : "";
     if (!action) return fallbackAction(input);
     return {
       action,
