@@ -8,6 +8,10 @@ interface GoogleTokenResponse {
   error?: string;
 }
 
+interface GoogleTokenError {
+  type?: string;
+}
+
 interface GoogleUserInfo {
   email?: string;
 }
@@ -21,6 +25,7 @@ declare global {
             client_id: string;
             scope: string;
             callback: (resp: GoogleTokenResponse) => void;
+            error_callback?: (err: GoogleTokenError) => void;
           }) => { requestAccessToken: (opts?: { prompt?: string }) => void };
         };
       };
@@ -81,8 +86,24 @@ async function getGoogleAccessToken(clientId: string): Promise<string> {
         }
         resolve(resp.access_token);
       },
+      error_callback: (err: GoogleTokenError) => {
+        const errType = err.type || "unknown";
+        if (errType === "popup_failed_to_open") {
+          reject(
+            new Error(
+              "Google sign-in popup was blocked. Allow popups for localhost:5173 and try again."
+            )
+          );
+          return;
+        }
+        if (errType === "popup_closed") {
+          reject(new Error("Google sign-in popup was closed before completion."));
+          return;
+        }
+        reject(new Error(`Google OAuth failed: ${errType}`));
+      },
     });
-    tokenClient.requestAccessToken({ prompt: "consent" });
+    tokenClient.requestAccessToken({ prompt: "select_account" });
   });
 }
 
@@ -114,7 +135,12 @@ async function fetchGmailPreview(accessToken: string): Promise<InboxPreviewItem[
       headers: { Authorization: `Bearer ${accessToken}` },
     }
   );
-  if (!listRes.ok) throw new Error("Failed to fetch Gmail messages.");
+  if (!listRes.ok) {
+    const body = await listRes.text();
+    throw new Error(
+      `Failed to fetch Gmail messages (${listRes.status}). ${body || "Check Gmail API + OAuth scopes."}`
+    );
+  }
   const listData = (await listRes.json()) as {
     messages?: Array<{ id?: string }>;
   };
@@ -151,9 +177,12 @@ export async function connectGoogleEmail(clientId: string): Promise<{
   inboxPreview: InboxPreviewItem[];
 }> {
   const accessToken = await getGoogleAccessToken(clientId);
-  const [email, inboxPreview] = await Promise.all([
-    fetchGoogleEmail(accessToken),
-    fetchGmailPreview(accessToken),
-  ]);
+  const email = await fetchGoogleEmail(accessToken);
+  let inboxPreview: InboxPreviewItem[] = [];
+  try {
+    inboxPreview = await fetchGmailPreview(accessToken);
+  } catch (err) {
+    console.warn("Gmail preview fetch failed; continuing with connected account.", err);
+  }
   return { email, inboxPreview };
 }

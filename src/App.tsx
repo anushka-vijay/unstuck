@@ -127,7 +127,7 @@ export default function App() {
     <div className="min-h-full flex flex-col">
       <Header
         apiReady={apiReady}
-        emailConnected={!!emailConnection}
+        emailConnection={emailConnection}
         onConfigureKey={() => setShowKeyModal(true)}
         onConfigureEmail={() => setShowEmailModal(true)}
       />
@@ -196,15 +196,21 @@ export default function App() {
 
 function Header({
   apiReady,
-  emailConnected,
+  emailConnection,
   onConfigureKey,
   onConfigureEmail,
 }: {
   apiReady: boolean;
-  emailConnected: boolean;
+  emailConnection: EmailConnection | null;
   onConfigureKey: () => void;
   onConfigureEmail: () => void;
 }) {
+  // Extract "anushka.vijay" from "anushka.vijay@gmail.com"
+  const username = useMemo(() => {
+    if (!emailConnection?.email) return null;
+    return emailConnection.email.split("@")[0];
+  }, [emailConnection]);
+
   return (
     <header className="w-full max-w-2xl mx-auto px-5 pt-8 pb-6 flex items-center justify-between">
       <div className="flex items-center gap-3">
@@ -213,25 +219,33 @@ function Header({
           <div className="font-display text-2xl font-semibold leading-none">
             The Unstuck Button
           </div>
-          <div className="text-xs text-ink/60 mt-1 tracking-wide uppercase">
+          <div className="text-xs text-ink/60 mt-1 tracking-wide uppercase font-mono">
             one step. right now.
           </div>
         </div>
       </div>
+      
       <div className="flex items-center gap-2">
         <button
           onClick={onConfigureEmail}
-          className="text-xs font-mono px-3 py-2 border-2 border-ink/20 hover:border-ink rounded-full transition-colors"
-          title="Configure email integration demo"
+          className={`text-xs font-mono px-3 py-2 border-2 transition-all flex items-center gap-2 rounded-full ${
+            username 
+              ? "border-ink bg-paper shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]" 
+              : "border-ink/20 hover:border-ink"
+          }`}
+          title="Manage Email Connection"
         >
-          {emailConnected ? "✉ email connected" : "✉ connect email"}
+          {/* Use a "User" or "Login" icon style */}
+          <span className="text-sm">{username ? "👤" : "🔑"}</span>
+          <span>{username ? username : "login"}</span>
         </button>
+
         <button
           onClick={onConfigureKey}
           className="text-xs font-mono px-3 py-2 border-2 border-ink/20 hover:border-ink rounded-full transition-colors"
-          title="Configure OpenAI API key"
+          title="API Status"
         >
-          {apiReady ? "● live" : "○ demo mode"}
+          {apiReady ? "● live" : "○ demo"}
         </button>
       </div>
     </header>
@@ -637,18 +651,14 @@ function EmailModal({
   onDisconnect: () => void;
   onClose: () => void;
 }) {
-  const [provider, setProvider] = useState<EmailProvider>(
-    connection?.provider ?? "gmail"
-  );
+  const [provider, setProvider] = useState<EmailProvider>("gmail");
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const providerLabel = provider === "gmail" ? "Gmail" : "Outlook";
   const googleClientId = (import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined)?.trim();
-  const canConnect = provider === "gmail" ? !!googleClientId : false;
-
+  
   async function handleConnect() {
-    if (!canConnect || provider !== "gmail" || !googleClientId) return;
+    if (provider !== "gmail" || !googleClientId) return;
     setError(null);
     setConnecting(true);
     try {
@@ -662,107 +672,130 @@ function EmailModal({
       window.localStorage.setItem(EMAIL_CONNECTION_KEY, JSON.stringify(next));
       onConnect(next);
     } catch (err) {
-      const msg =
-        err instanceof Error ? err.message : "OAuth failed. Please try again.";
-      setError(msg);
+      setError(err instanceof Error ? err.message : "OAuth failed.");
     } finally {
       setConnecting(false);
     }
   }
 
-  function handleDisconnect() {
-    window.localStorage.removeItem(EMAIL_CONNECTION_KEY);
-    onDisconnect();
-  }
-
   return (
-    <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm flex items-center justify-center p-5 z-50">
-      <div className="card bg-cream w-full max-w-xl p-6">
-        <div className="font-display text-2xl font-semibold mb-2">
-          Email integration
-        </div>
-        <p className="text-sm text-ink/70 mb-5">
-          Connect with real OAuth. Gmail uses Google OAuth + Gmail API in the browser.
-        </p>
-        <div className="text-xs text-ink/60 mb-4">
-          No typing needed in this modal. Click <span className="font-semibold">connect Gmail</span> to open the Google sign-in popup.
-        </div>
-
-        <div className="grid sm:grid-cols-2 gap-3 mb-4">
-          <button
-            onClick={() => setProvider("gmail")}
-            className={"chip text-center " + (provider === "gmail" ? "selected" : "")}
-          >
-            connect Gmail
-          </button>
-          <button
-            onClick={() => setProvider("outlook")}
-            className={"chip text-center " + (provider === "outlook" ? "selected" : "")}
-          >
-            Outlook (next)
-          </button>
-        </div>
-        {provider === "gmail" && !googleClientId && (
-          <div className="card bg-paper p-4 mb-5 text-sm text-ink/70">
-            Missing `VITE_GOOGLE_CLIENT_ID` in `.env.local`. Add a Google OAuth
-            Web Client ID, then restart `npm run dev`.
-          </div>
-        )}
-        {provider === "outlook" && (
-          <div className="card bg-paper p-4 mb-5 text-sm text-ink/70">
-            Outlook OAuth is not wired yet. Use Gmail for the live demo right now.
-          </div>
-        )}
-        {error && (
-          <div className="card bg-paper p-4 mb-5 text-sm text-rust">{error}</div>
-        )}
-
-        <div className="card bg-paper p-4 mb-5">
-          <div className="text-xs uppercase tracking-widest text-ink/50 mb-3">
-            Connected inbox preview
-          </div>
-          {connection ? (
-            <div className="space-y-2 text-sm">
-              <div className="font-mono text-ink/70">
-                {connection.provider} · {connection.email}
-              </div>
-              {connection.inboxPreview.map((m) => (
-                <div key={m.from + m.subject} className="border-t-2 border-ink/10 pt-2">
-                  <div className="font-semibold">{m.subject}</div>
-                  <div className="text-ink/60">from {m.from}</div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="text-sm text-ink/60">
-              No account connected yet. Click connect to start real OAuth with{" "}
-              {providerLabel}.
-            </div>
-          )}
+    <div className="fixed inset-0 bg-ink/40 backdrop-blur-md flex items-center justify-center p-5 z-50">
+      <div className="card bg-paper w-full max-w-xl p-8 shadow-2xl border-[3px] border-ink">
+        {/* Header Section */}
+        <div className="mb-8">
+          <h2 className="font-display text-3xl font-bold tracking-tight mb-2 text-ink">
+            Email Integration
+          </h2>
+          <p className="text-ink/60 font-body leading-relaxed">
+            Connect your inbox to allow the agent to discover relevant context and research materials.
+          </p>
         </div>
 
-        <div className="flex flex-wrap gap-3 justify-end">
-          {connection && (
+        {/* Step 1: Select Provider */}
+        <div className="mb-8">
+          <label className="text-[10px] uppercase tracking-[0.2em] font-bold text-ink/40 mb-4 block">
+            01 — Select Provider
+          </label>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {/* Gmail Option */}
             <button
-              onClick={handleDisconnect}
-              className="press-btn bg-paper text-ink font-semibold px-4 py-2 text-sm"
+              onClick={() => {
+                setProvider("gmail");
+                if (!connection) {
+                  void handleConnect();
+                }
+              }}
+              disabled={connecting || !googleClientId}
+              className={`flex items-center gap-4 p-4 border-[3px] transition-all text-left ${
+                provider === "gmail" 
+                  ? "border-ink bg-mustard shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]" 
+                  : "border-ink/10 bg-cream hover:border-ink/30"
+              } ${connecting || !googleClientId ? "opacity-60 cursor-not-allowed" : ""}`}
             >
-              disconnect
+              <span className="text-2xl">✉️</span>
+              <div>
+                <div className="font-bold font-display">Google Gmail</div>
+                <div className="text-xs opacity-70">
+                  {connecting ? "Opening OAuth..." : "Official API Access"}
+                </div>
+              </div>
             </button>
+
+            {/* Outlook Option (Disabled/Coming Soon) */}
+            <div className="flex items-center gap-4 p-4 border-[3px] border-ink/5 bg-ink/[0.02] cursor-not-allowed grayscale opacity-50 relative overflow-hidden">
+              <span className="text-2xl">📧</span>
+              <div>
+                <div className="font-bold font-display text-ink/40">Outlook</div>
+                <div className="text-[10px] font-mono bg-ink/10 px-1 inline-block">COMING SOON</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Step 2: Connection Status / Preview */}
+        <div className="mb-10">
+          <label className="text-[10px] uppercase tracking-[0.2em] font-bold text-ink/40 mb-4 block">
+            02 — Connection Status
+          </label>
+          
+          <div className="bg-cream border-2 border-ink/10 rounded-lg p-5">
+            {connection ? (
+              <div className="animate-in fade-in slide-in-from-bottom-1">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-sage animate-pulse" />
+                    <span className="font-mono text-sm font-bold">{connection.email}</span>
+                  </div>
+                  <button 
+                    onClick={onDisconnect}
+                    className="text-[10px] font-bold underline hover:text-rust"
+                  >
+                    DISCONNECT
+                  </button>
+                </div>
+                
+                <div className="space-y-3">
+                  {connection.inboxPreview.map((m, i) => (
+                    <div key={i} className="text-xs border-l-2 border-mustard pl-3 py-1">
+                      <div className="font-bold text-ink truncate">{m.subject}</div>
+                      <div className="text-ink/50">from {m.from}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="text-center py-4">
+                <p className="text-sm text-ink/40 italic font-body">
+                  No account linked. Use the button below to authenticate.
+                </p>
+              </div>
+            )}
+          </div>
+          
+          {error && (
+            <div className="mt-4 p-3 bg-rust/10 border-l-4 border-rust text-rust text-xs font-mono">
+              {error}
+            </div>
           )}
+        </div>
+
+        {/* Footer Actions */}
+        <div className="flex items-center justify-end gap-4 border-t-2 border-ink/5 pt-6">
           <button
             onClick={onClose}
-            className="press-btn bg-paper text-ink font-semibold px-4 py-2 text-sm"
+            className="text-sm font-bold text-ink/40 hover:text-ink transition-colors"
           >
-            close
+            Cancel
           </button>
-          <button
-            onClick={handleConnect}
-            disabled={!canConnect || connecting}
-            className="press-btn bg-ink text-paper font-semibold px-4 py-2 text-sm"
-          >
-            {connecting ? `connecting to ${providerLabel}...` : `connect ${providerLabel}`}
-          </button>
+
+          {connection && (
+            <button
+              onClick={onClose}
+              className="press-btn bg-ink text-paper px-8 py-3 font-display font-bold text-lg"
+            >
+              Done
+            </button>
+          )}
         </div>
       </div>
     </div>
