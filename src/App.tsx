@@ -11,6 +11,7 @@ import {
   connectGoogleEmail,
   type InboxPreviewItem,
 } from "./lib/emailOAuth";
+import { addTaskToGoogleCalendar } from "./lib/googleCalendar";
 
 type Step = "dump" | "tasks" | "setup" | "action";
 type EmailProvider = "gmail" | "outlook";
@@ -166,6 +167,7 @@ export default function App() {
             <ActionStep
               loading={loadingAction}
               result={result}
+              task={task}
               onReset={reset}
             />
           )}
@@ -527,13 +529,37 @@ function TimeBtn({
 function ActionStep({
   loading,
   result,
+  task,
   onReset,
 }: {
   loading: boolean;
   result: UnstickResult | null;
+  task: string;
   onReset: () => void;
 }) {
   const dots = useMemo(() => [0, 1, 2], []);
+  const [addingToCalendar, setAddingToCalendar] = useState(false);
+  const [calendarStatus, setCalendarStatus] = useState<string | null>(null);
+  const googleClientId = (
+    import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined
+  )?.trim();
+
+  async function onAddToCalendar() {
+    if (!googleClientId || !result) return;
+    setAddingToCalendar(true);
+    setCalendarStatus(null);
+    try {
+      await addTaskToGoogleCalendar(googleClientId, result.action || task);
+      setCalendarStatus("Added to your Google Calendar.");
+    } catch (err) {
+      setCalendarStatus(
+        err instanceof Error ? err.message : "Failed to add calendar event."
+      );
+    } finally {
+      setAddingToCalendar(false);
+    }
+  }
+
   return (
     <section>
       {loading || !result ? (
@@ -569,10 +595,25 @@ function ActionStep({
             >
               start over
             </button>
+            <button
+              onClick={onAddToCalendar}
+              disabled={!googleClientId || addingToCalendar}
+              className="press-btn bg-sage text-ink font-semibold px-5 py-3"
+              title={
+                googleClientId
+                  ? "Add this task to Google Calendar"
+                  : "Missing VITE_GOOGLE_CLIENT_ID"
+              }
+            >
+              {addingToCalendar ? "adding to calendar..." : "add to calendar"}
+            </button>
             <div className="text-sm text-ink/50 sm:ml-auto sm:self-center">
               no streak. no score. close the tab when you're done.
             </div>
           </div>
+          {calendarStatus && (
+            <div className="mt-3 text-sm text-ink/70">{calendarStatus}</div>
+          )}
         </>
       )}
     </section>
@@ -788,14 +829,6 @@ function EmailModal({
             Cancel
           </button>
 
-          {connection && (
-            <button
-              onClick={onClose}
-              className="press-btn bg-ink text-paper px-8 py-3 font-display font-bold text-lg"
-            >
-              Done
-            </button>
-          )}
         </div>
       </div>
     </div>
